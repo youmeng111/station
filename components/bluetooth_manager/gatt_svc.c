@@ -1,4 +1,5 @@
 #include "gatt_svc.h"
+#include "services/gap/ble_svc_gap.h"
 
 /* Private function declarations */
 static int led_strip_cmd_chr_access(uint16_t conn_handle, uint16_t attr_handle,
@@ -36,14 +37,14 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
             {
                 /*** LED Strip Command Characteristic ***/
                 .uuid = &led_strip_cmd_chr_uuid.u,
-                .access_event = led_strip_cmd_chr_access,
+                .access_cb = led_strip_cmd_chr_access,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
                 .val_handle = &led_strip_cmd_chr_val_handle,
             },
             {
                 /*** LED Strip Notify Characteristic ***/
                 .uuid = &led_strip_notify_chr_uuid.u,
-                .access_event = led_strip_notify_chr_access,
+                .access_cb = led_strip_notify_chr_access,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &led_strip_notify_chr_val_handle,
             },
@@ -514,7 +515,7 @@ void gatt_svr_subscribe_cb(struct ble_gap_event *event) {
 int gatt_svc_init(void) {
     int rc;
 
-    ble_svc_gap_init();
+    /* 只初始化GATT服务，GAP服务由蓝牙管理器初始化 */
     ble_svc_gatt_init();
 
     rc = ble_gatts_count_cfg(gatt_svr_svcs);
