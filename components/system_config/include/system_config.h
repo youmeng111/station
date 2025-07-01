@@ -80,7 +80,4 @@ extern system_status_t g_system_status;
 // 系统初始化函数
 void system_config_init(void);
 
-// BLE存储配置初始化（存根函数） - 蓝牙功能已关闭
-// void ble_store_config_init(void);
-
 #endif // SYSTEM_CONFIG_H 

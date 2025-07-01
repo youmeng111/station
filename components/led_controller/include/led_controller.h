@@ -31,4 +31,13 @@ void led_command_handler_task(void *pvParameters);
 // 获取所有LED状态的JSON字符串
 int led_get_status_json(char *buffer, size_t buffer_size);
 
+// 蓝牙管理器需要的函数接口
+esp_err_t led_controller_turn_on(uint8_t led_id);
+esp_err_t led_controller_turn_off(uint8_t led_id);
+esp_err_t led_controller_set_brightness(uint8_t led_id, uint8_t brightness);
+esp_err_t led_controller_set_color(uint8_t led_id, uint8_t red, uint8_t green, uint8_t blue);
+bool led_controller_is_on(uint8_t led_id);
+uint8_t led_controller_get_brightness(uint8_t led_id);
+void led_controller_get_color(uint8_t led_id, uint8_t *red, uint8_t *green, uint8_t *blue);
+
 #endif // LED_CONTROLLER_H 

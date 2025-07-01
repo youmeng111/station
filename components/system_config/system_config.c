@@ -23,10 +23,3 @@ void system_config_init(void)
     
     ESP_LOGI(STATION_TAG, "System configuration initialized");
 }
-
-// BLE存储配置初始化存根
-void ble_store_config_init(void)
-{
-    // 这是一个存根函数，实际的BLE存储配置在蓝牙管理器中处理
-    ESP_LOGI(STATION_TAG, "BLE store config init (stub)");
-} 

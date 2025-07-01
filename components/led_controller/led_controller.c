@@ -169,4 +169,51 @@ int led_get_status_json(char *buffer, size_t buffer_size)
     offset += snprintf(buffer + offset, buffer_size - offset, "]}");
     
     return offset;
+}
+
+// 蓝牙管理器需要的函数接口实现
+esp_err_t led_controller_turn_on(uint8_t led_id)
+{
+    return led_strip_on(led_id);
+}
+
+esp_err_t led_controller_turn_off(uint8_t led_id)
+{
+    return led_strip_off(led_id);
+}
+
+esp_err_t led_controller_set_brightness(uint8_t led_id, uint8_t brightness)
+{
+    return led_strip_set_brightness(led_id, brightness);
+}
+
+esp_err_t led_controller_set_color(uint8_t led_id, uint8_t red, uint8_t green, uint8_t blue)
+{
+    return led_strip_set_color(led_id, red, green, blue);
+}
+
+bool led_controller_is_on(uint8_t led_id)
+{
+    if (led_id >= MAX_LED_STRIPS) {
+        return false;
+    }
+    return led_strips[led_id].is_on;
+}
+
+uint8_t led_controller_get_brightness(uint8_t led_id)
+{
+    if (led_id >= MAX_LED_STRIPS) {
+        return 0;
+    }
+    return led_strips[led_id].brightness;
+}
+
+void led_controller_get_color(uint8_t led_id, uint8_t *red, uint8_t *green, uint8_t *blue)
+{
+    if (led_id >= MAX_LED_STRIPS || !red || !green || !blue) {
+        return;
+    }
+    *red = led_strips[led_id].red;
+    *green = led_strips[led_id].green;
+    *blue = led_strips[led_id].blue;
 } 
