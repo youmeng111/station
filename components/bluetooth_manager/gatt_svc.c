@@ -1,5 +1,4 @@
 #include "gatt_svc.h"
-#include "services/gap/ble_svc_gap.h"
 
 /* Private function declarations */
 static int led_strip_cmd_chr_access(uint16_t conn_handle, uint16_t attr_handle,
