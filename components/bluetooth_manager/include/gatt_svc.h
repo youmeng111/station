@@ -31,8 +31,8 @@ void handle_led_strip_command(const ble_led_cmd_t *cmd);
 uint16_t create_led_status_frame(uint8_t *frame_buffer, uint16_t buffer_size);
 uint16_t create_response_frame(uint8_t cmd_type, uint16_t device_id, const uint8_t *data, uint8_t data_len, uint8_t *frame_buffer, uint16_t buffer_size);
 
-/* CRC16校验函数 */
-uint16_t crc16_calculate(const uint8_t *data, uint16_t length);
+/* 16位和校验函数 */
+uint16_t checksum16_calculate(const uint8_t *data, uint16_t length);
 
 /* 协议帧封装和解析函数 */
 uint16_t protocol_frame_pack(uint8_t *frame_buf, const uint8_t *data, uint8_t data_len);

@@ -57,23 +57,23 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     },
 };
 
-/* CRC16校验算法实现 (CRC-16-IBM) */
-uint16_t crc16_calculate(const uint8_t *data, uint16_t length)
+/* 16位和校验算法实现 */
+uint16_t checksum16_calculate(const uint8_t *data, uint16_t length)
 {
-    uint16_t crc = 0x0000;
-    uint16_t polynomial = 0x8005;
+    uint32_t sum = 0;
     
+    // 累加所有数据字节
     for (uint16_t i = 0; i < length; i++) {
-        crc ^= ((uint16_t)data[i] << 8);
-        for (uint8_t j = 0; j < 8; j++) {
-            if (crc & 0x8000) {
-                crc = (crc << 1) ^ polynomial;
-            } else {
-                crc <<= 1;
-            }
-        }
+        sum += data[i];
     }
-    return crc;
+    
+    // 将进位加回到低16位
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    
+    // 返回16位和校验值（取反）
+    return ~((uint16_t)sum);
 }
 
 /* 协议帧封装函数 */
@@ -97,10 +97,10 @@ uint16_t protocol_frame_pack(uint8_t *frame_buf, const uint8_t *data, uint8_t da
     memcpy(&frame_buf[frame_len], data, data_len);
     frame_len += data_len;
     
-    // CRC16校验(大端格式)
-    crc16 = crc16_calculate(data, data_len);
-    frame_buf[frame_len++] = (crc16 >> 8) & 0xFF;  // CRC16高字节
-    frame_buf[frame_len++] = crc16 & 0xFF;         // CRC16低字节
+    // 16位和校验(大端格式)
+    crc16 = checksum16_calculate(data, data_len);
+    frame_buf[frame_len++] = (crc16 >> 8) & 0xFF;  // 校验高字节
+    frame_buf[frame_len++] = crc16 & 0xFF;         // 校验低字节
     
     // 帧尾
     frame_buf[frame_len++] = PROTOCOL_FRAME_TAIL_1;
@@ -133,7 +133,7 @@ uint8_t protocol_frame_parse(const uint8_t *frame_buf, uint16_t frame_len, uint8
     }
     
     // 检查帧长度
-    uint16_t expected_frame_len = 7 + expected_data_len; // 帧头(2) + 长度(1) + 数据 + CRC16(2) + 帧尾(2)
+    uint16_t expected_frame_len = 7 + expected_data_len; // 帧头(2) + 长度(1) + 数据 + 校验(2) + 帧尾(2)
     if (frame_len != expected_frame_len) {
         return PROTOCOL_ERR_LENGTH;
     }
@@ -142,13 +142,13 @@ uint8_t protocol_frame_parse(const uint8_t *frame_buf, uint16_t frame_len, uint8
     memcpy(data, &frame_buf[3], expected_data_len);
     *data_len = expected_data_len;
     
-    // 校验CRC16
-    uint16_t received_crc = (frame_buf[3 + expected_data_len] << 8) | frame_buf[4 + expected_data_len];
-    uint16_t calculated_crc = crc16_calculate(data, expected_data_len);
+    // 校验和校验
+    uint16_t received_checksum = (frame_buf[3 + expected_data_len] << 8) | frame_buf[4 + expected_data_len];
+    uint16_t calculated_checksum = checksum16_calculate(data, expected_data_len);
     
-    if (received_crc != calculated_crc) {
-        ESP_LOGE(BT_TAG, "CRC16 mismatch: received=0x%04X, calculated=0x%04X", received_crc, calculated_crc);
-        return PROTOCOL_ERR_CRC16;
+    if (received_checksum != calculated_checksum) {
+        ESP_LOGE(BT_TAG, "Checksum mismatch: received=0x%04X, calculated=0x%04X", received_checksum, calculated_checksum);
+        return PROTOCOL_ERR_CHECKSUM;
     }
     
     return PROTOCOL_OK;

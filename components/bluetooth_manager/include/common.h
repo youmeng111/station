@@ -49,7 +49,7 @@
 #define PROTOCOL_FRAME_TAIL_1   0x55
 #define PROTOCOL_FRAME_TAIL_2   0xAA
 #define MAX_PROTOCOL_DATA_LENGTH 18
-#define MAX_PROTOCOL_FRAME_LENGTH (MAX_PROTOCOL_DATA_LENGTH + 7) // 帧头(2) + 长度(1) + 数据(18) + CRC16(2) + 帧尾(2)
+#define MAX_PROTOCOL_FRAME_LENGTH (MAX_PROTOCOL_DATA_LENGTH + 7) // 帧头(2) + 长度(1) + 数据(18) + 校验(2) + 帧尾(2)
 
 /* 灯条协议命令类型定义 */
 #define CMD_SET_LIGHT_DURATION  0x01  // 设置亮灯时长
@@ -98,7 +98,7 @@
 #define PROTOCOL_ERR_FRAME_HEAD     0x01
 #define PROTOCOL_ERR_FRAME_TAIL     0x02
 #define PROTOCOL_ERR_LENGTH         0x03
-#define PROTOCOL_ERR_CRC16          0x04
+#define PROTOCOL_ERR_CHECKSUM       0x04
 #define PROTOCOL_ERR_BUFFER_FULL    0x05
 
 /* LED命令结构 - 使用system_config.h中的定义 */
@@ -109,7 +109,7 @@ typedef struct __attribute__((packed)) {
     uint8_t header[2];          // 帧头 AA 55
     uint8_t length;             // 数据长度
     uint8_t data[MAX_PROTOCOL_DATA_LENGTH]; // 数据部分
-    uint16_t crc16;             // CRC16校验(大端格式)
+    uint16_t checksum;          // 16位和校验(大端格式)
     uint8_t tail[2];            // 帧尾 55 AA
 } protocol_frame_t;
 
