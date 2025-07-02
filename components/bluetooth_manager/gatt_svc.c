@@ -8,18 +8,18 @@ static int led_strip_notify_chr_access(uint16_t conn_handle, uint16_t attr_handl
 
 /* Private variables */
 /* LED控制服务 */
-static const ble_uuid128_t led_strip_svc_uuid = 
-    BLE_UUID128_INIT(LED_STRIP_SERVICE_UUID_128);
+static const ble_uuid16_t led_strip_svc_uuid = 
+    BLE_UUID16_INIT(LED_STRIP_SERVICE_UUID_16);
 
 /* LED命令特征值 (写入) */
 static uint16_t led_strip_cmd_chr_val_handle;
-static const ble_uuid128_t led_strip_cmd_chr_uuid = 
-    BLE_UUID128_INIT(LED_STRIP_CMD_CHAR_UUID_128);
+static const ble_uuid16_t led_strip_cmd_chr_uuid = 
+    BLE_UUID16_INIT(LED_STRIP_CMD_CHAR_UUID_16);
 
 /* LED响应特征值 (通知) */
 static uint16_t led_strip_notify_chr_val_handle;
-static const ble_uuid128_t led_strip_notify_chr_uuid = 
-    BLE_UUID128_INIT(LED_STRIP_NOTIFY_CHAR_UUID_128);
+static const ble_uuid16_t led_strip_notify_chr_uuid = 
+    BLE_UUID16_INIT(LED_STRIP_NOTIFY_CHAR_UUID_16);
 
 /* 连接状态 */
 static uint16_t current_conn_handle = 0;
@@ -372,20 +372,35 @@ static int led_strip_cmd_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                         /* 处理LED命令 */
                         handle_led_strip_command(&led_cmd);
                         
-                        /* 发送成功响应 */
-                        uint8_t response_data = 0x00; // 成功
-                        uint8_t response_frame[MAX_PROTOCOL_FRAME_LENGTH];
-                        uint16_t response_len = create_response_frame(0xFF, 0x0001, &response_data, 1, response_frame, sizeof(response_frame));
-                        if (response_len > 0) {
-                            send_led_response_notification(response_frame, response_len);
-                        }
+                        /* 发送简化的成功响应（适配20字节MTU限制） */
+                        uint8_t simple_response[20];
+                        memset(simple_response, 0, sizeof(simple_response));
+                        
+                        // 简化协议格式：AA 55 [长度] [命令类型] [状态] [LED_ID] [颜色] ... [余位补0]
+                        simple_response[0] = 0xAA;  // 帧头1
+                        simple_response[1] = 0x55;  // 帧头2
+                        simple_response[2] = 0x10;  // 数据长度16字节（适配20字节总长度）
+                        simple_response[3] = 0xFF;  // 响应命令类型
+                        simple_response[4] = 0x00;  // 成功状态
+                        simple_response[5] = led_cmd.led_id;  // LED ID
+                        simple_response[6] = led_cmd.param1;  // 颜色
+                        simple_response[7] = led_controller_is_on(led_cmd.led_id) ? 1 : 0;  // 开关状态
+                        // 其余字节保持0
+                        
+                        send_led_response_notification(simple_response, 20);
                     } else {
-                        /* 发送错误响应 */
-                        uint8_t response_frame[MAX_PROTOCOL_FRAME_LENGTH];
-                        uint16_t response_len = create_response_frame(0xFF, 0x0001, &parse_result, 1, response_frame, sizeof(response_frame));
-                        if (response_len > 0) {
-                            send_led_response_notification(response_frame, response_len);
-                        }
+                        /* 发送简化的错误响应（适配20字节MTU限制） */
+                        uint8_t simple_response[20];
+                        memset(simple_response, 0, sizeof(simple_response));
+                        
+                        simple_response[0] = 0xAA;  // 帧头1
+                        simple_response[1] = 0x55;  // 帧头2
+                        simple_response[2] = 0x10;  // 数据长度16字节
+                        simple_response[3] = 0xFF;  // 响应命令类型
+                        simple_response[4] = parse_result;  // 错误状态
+                        // 其余字节保持0
+                        
+                        send_led_response_notification(simple_response, 20);
                     }
                 }
                 return 0;
@@ -454,6 +469,12 @@ void send_led_response_notification(const uint8_t* response, uint16_t length) {
             ESP_LOGE(BT_TAG, "Failed to send response notification: %d", rc);
         } else {
             ESP_LOGI(BT_TAG, "Response notification sent successfully (%d bytes)", length);
+            /* 打印发送的数据内容（前8字节用于调试） */
+            if (length >= 8) {
+                ESP_LOGI(BT_TAG, "Response data: %02X %02X %02X %02X %02X %02X %02X %02X...", 
+                         response[0], response[1], response[2], response[3], 
+                         response[4], response[5], response[6], response[7]);
+            }
         }
     } else {
         ESP_LOGE(BT_TAG, "Failed to create mbuf for response notification");
@@ -498,6 +519,14 @@ void gatt_svr_subscribe_cb(struct ble_gap_event *event) {
         if (event->subscribe.cur_notify) {
             ESP_LOGI(BT_TAG, "LED strip notifications enabled");
             notify_enabled = true;
+            
+            /* 协商更大的MTU以支持完整的协议帧 */
+            rc = ble_gattc_exchange_mtu(event->subscribe.conn_handle, NULL, NULL);
+            if (rc != 0) {
+                ESP_LOGW(BT_TAG, "MTU exchange failed: %d", rc);
+            } else {
+                ESP_LOGI(BT_TAG, "MTU exchange initiated");
+            }
         } else {
             ESP_LOGI(BT_TAG, "LED strip notifications disabled");
             notify_enabled = false;

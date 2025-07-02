@@ -46,7 +46,6 @@ static void print_conn_desc(struct ble_gap_conn_desc *desc) {
 static void start_advertising(void) {
     /* Local variables */
     int rc = 0;
-    const char *name;
     struct ble_hs_adv_fields adv_fields = {0};
     struct ble_hs_adv_fields rsp_fields = {0};
     struct ble_gap_adv_params adv_params = {0};
@@ -54,19 +53,15 @@ static void start_advertising(void) {
     /* Set advertising flags - 必需字段 */
     adv_fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
-    /* Set device name - 缩短设备名称以节省空间 */
-    name = ble_svc_gap_device_name();
-    adv_fields.name = (uint8_t *)name;
-    adv_fields.name_len = strlen(name);
+    /* Set shortened device name to save space */
+    static const char *short_name = "ESP32_LED";
+    adv_fields.name = (uint8_t *)short_name;
+    adv_fields.name_len = strlen(short_name);
     adv_fields.name_is_complete = 1;
 
-    /* Set device tx power - 重要字段，保留 */
+    /* Set device tx power */
     adv_fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
     adv_fields.tx_pwr_lvl_is_present = 1;
-
-    /* 删除appearance和le_role字段以节省空间 */
-    /* adv_fields.appearance = BLE_GAP_APPEARANCE_GENERIC_TAG; */
-    /* adv_fields.le_role = BLE_GAP_LE_ROLE_PERIPHERAL; */
 
     /* Set advertiement fields */
     rc = ble_gap_adv_set_fields(&adv_fields);
@@ -75,19 +70,11 @@ static void start_advertising(void) {
         return;
     }
 
-    /* 简化扫描响应数据 - 只保留关键信息 */
-    /* Set device address */
-    rsp_fields.device_addr = addr_val;
-    rsp_fields.device_addr_type = own_addr_type;
-    rsp_fields.device_addr_is_present = 1;
-
-    /* 删除URI字段以节省空间 */
-    /* rsp_fields.uri = esp_uri; */
-    /* rsp_fields.uri_len = sizeof(esp_uri); */
-
-    /* Set advertising interval */
-    rsp_fields.adv_itvl = BLE_GAP_ADV_ITVL_MS(BLE_ADV_INTERVAL_MIN);
-    rsp_fields.adv_itvl_is_present = 1;
+    /* 在扫描响应中添加自定义服务UUID (16位) */
+    static ble_uuid16_t rsp_uuid16 = BLE_UUID16_INIT(LED_STRIP_SERVICE_UUID_16);
+    rsp_fields.uuids16 = &rsp_uuid16;
+    rsp_fields.num_uuids16 = 1;
+    rsp_fields.uuids16_is_complete = 1;
 
     /* Set scan response fields */
     rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
@@ -228,9 +215,14 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
     /* MTU update event */
     case BLE_GAP_EVENT_MTU:
         /* Print MTU update info to log */
-        ESP_LOGI(BT_TAG, "mtu update event; conn_handle=%d cid=%d mtu=%d",
+        ESP_LOGI(BT_TAG, "MTU updated: conn_handle=%d cid=%d new_mtu=%d",
                  event->mtu.conn_handle, event->mtu.channel_id,
                  event->mtu.value);
+        if (event->mtu.value > 23) {
+            ESP_LOGI(BT_TAG, "MTU increased to %d, can now send larger frames", event->mtu.value);
+        } else {
+            ESP_LOGI(BT_TAG, "MTU remains at %d, using simplified response format", event->mtu.value);
+        }
         return rc;
     }
 
