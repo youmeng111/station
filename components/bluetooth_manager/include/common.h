@@ -32,7 +32,7 @@
 
 /* Defines */
 #define BT_TAG "ESP32_Station_BLE"
-#define DEVICE_NAME "ESP32_Station_BLE"
+#define DEVICE_NAME "ESP32_Station"
 
 /* BLE地址格式宏 */
 #define ADDR_FORMAT "%02x:%02x:%02x:%02x:%02x:%02x"

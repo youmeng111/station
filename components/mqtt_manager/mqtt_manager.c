@@ -275,7 +275,9 @@ void mqtt_handle_message(const char *topic, const char *data, int data_len)
     ESP_LOGI(TAG, "Handling MQTT message on topic: %s", topic);
     
     if (strcmp(topic, MQTT_TOPIC_COMMAND) == 0) {
-        // 解析JSON命令格式: {"cmd":"LED_ON","led_id":1,"param1":255,"param2":0,"param3":0}
+        // 解析JSON命令格式: 
+        // {"cmd":"LED_CONTROL","led_id":1,"action":"ON","color":"RED","duration":5000}
+        // 或 {"cmd":"LED_OFF","led_id":1}
         
         led_command_t command = {0};
         
@@ -302,21 +304,39 @@ void mqtt_handle_message(const char *topic, const char *data, int data_len)
                         command.type = CMD_LED_OFF;
                     } else if (strcmp(cmd_str, "LED_TOGGLE") == 0) {
                         command.type = CMD_LED_TOGGLE;
-                    } else if (strcmp(cmd_str, "LED_BRIGHTNESS") == 0) {
-                        command.type = CMD_LED_BRIGHTNESS;
-                        char *param1_start = strstr(data, "\"param1\":");
-                        if (param1_start) {
-                            command.param1 = atoi(param1_start + 9);
-                        }
-                    } else if (strcmp(cmd_str, "LED_COLOR") == 0) {
-                        command.type = CMD_LED_COLOR;
-                        char *param1_start = strstr(data, "\"param1\":");
-                        char *param2_start = strstr(data, "\"param2\":");
-                        char *param3_start = strstr(data, "\"param3\":");
-                        if (param1_start && param2_start && param3_start) {
-                            command.param1 = atoi(param1_start + 9);
-                            command.param2 = atoi(param2_start + 9);
-                            command.param3 = atoi(param3_start + 9);
+                    } else if (strcmp(cmd_str, "LED_CONTROL") == 0) {
+                        // 解析颜色参数
+                        char *color_start = strstr(data, "\"color\":\"");
+                        char *duration_start = strstr(data, "\"duration\":");
+                        
+                        if (color_start) {
+                            color_start += 9; // 跳过 "color":"
+                            char *color_end = strchr(color_start, '"');
+                            if (color_end) {
+                                char color_str[16] = {0};
+                                int color_len = color_end - color_start;
+                                if (color_len < sizeof(color_str)) {
+                                    memcpy(color_str, color_start, color_len);
+                                    led_color_t color = led_color_from_string(color_str);
+                                    
+                                    if (duration_start) {
+                                        // 带时长的颜色控制
+                                        command.type = CMD_LED_COLOR_WITH_TIME;
+                                        command.param1 = color;
+                                        uint32_t duration_ms = atoi(duration_start + 11);
+                                        command.param2 = duration_ms & 0xFFFF;
+                                        command.param3 = (duration_ms >> 16) & 0xFFFF;
+                                    } else {
+                                        // 简单颜色控制
+                                        command.type = CMD_LED_COLOR;
+                                        command.param1 = color;
+                                    }
+                                } else {
+                                    // 没有颜色参数，默认白色
+                                    command.type = CMD_LED_COLOR;
+                                    command.param1 = LED_COLOR_WHITE;
+                                }
+                            }
                         }
                     } else if (strcmp(cmd_str, "GET_STATUS") == 0) {
                         mqtt_send_status();
@@ -334,11 +354,14 @@ void mqtt_handle_message(const char *topic, const char *data, int data_len)
                         case CMD_LED_TOGGLE:
                             led_strip_toggle(command.led_id);
                             break;
-                        case CMD_LED_BRIGHTNESS:
-                            led_strip_set_brightness(command.led_id, command.param1);
-                            break;
                         case CMD_LED_COLOR:
-                            led_strip_set_color(command.led_id, command.param1, command.param2, command.param3);
+                            led_strip_set_color(command.led_id, (led_color_t)command.param1);
+                            break;
+                        case CMD_LED_COLOR_WITH_TIME:
+                            {
+                                uint32_t duration_ms = ((uint32_t)command.param3 << 16) | command.param2;
+                                led_strip_set_color_with_duration(command.led_id, (led_color_t)command.param1, duration_ms);
+                            }
                             break;
                         default:
                             ESP_LOGW(TAG, "Unknown MQTT command type: %d", command.type);

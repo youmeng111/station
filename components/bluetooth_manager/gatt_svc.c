@@ -185,46 +185,49 @@ uint8_t parse_led_strip_command(const uint8_t *frame_data, uint16_t frame_len, b
     // 根据命令类型填充LED命令结构
     switch (station_cmd->cmd_type) {
     case CMD_SET_LIGHT_DURATION:
-        cmd->type = CMD_LED_ON; // 映射到LED开启命令
+        cmd->type = CMD_LED_COLOR_WITH_TIME;
         cmd->led_id = (uint8_t)(device_id & 0xFF);
+        cmd->param1 = LED_COLOR_WHITE; // 默认白色
         if (station_cmd->data_length >= 2) {
-            // 时长 (大端转小端)
-            uint16_t duration = (station_cmd->cmd_data[0] << 8) | station_cmd->cmd_data[1];
-            cmd->param1 = (uint8_t)(duration & 0xFF); // 存储时长(秒)
+            // 时长 (大端转小端，从秒转换为毫秒)
+            uint16_t duration_sec = (station_cmd->cmd_data[0] << 8) | station_cmd->cmd_data[1];
+            uint32_t duration_ms = duration_sec * 1000;
+            cmd->param2 = duration_ms; // 存储时长(毫秒)
+        } else {
+            cmd->param2 = 0; // 永久点亮
         }
         break;
         
     case CMD_SET_LIGHT_COLOR:
-        cmd->type = CMD_LED_COLOR;
         cmd->led_id = (uint8_t)(device_id & 0xFF);
         if (station_cmd->data_length >= 1) {
-            // 将灯条颜色值映射为RGB
-            switch (station_cmd->cmd_data[0]) {
-            case LED_COLOR_RED:    cmd->param1 = 255; cmd->param2 = 0;   cmd->param3 = 0;   break;
-            case LED_COLOR_GREEN:  cmd->param1 = 0;   cmd->param2 = 255; cmd->param3 = 0;   break;
-            case LED_COLOR_BLUE:   cmd->param1 = 0;   cmd->param2 = 0;   cmd->param3 = 255; break;
-            case LED_COLOR_YELLOW: cmd->param1 = 255; cmd->param2 = 255; cmd->param3 = 0;   break;
-            case LED_COLOR_PURPLE: cmd->param1 = 255; cmd->param2 = 0;   cmd->param3 = 255; break;
-            case LED_COLOR_CYAN:   cmd->param1 = 0;   cmd->param2 = 255; cmd->param3 = 255; break;
-            case LED_COLOR_WHITE:  cmd->param1 = 255; cmd->param2 = 255; cmd->param3 = 255; break;
-            case LED_COLOR_OFF:    cmd->type = CMD_LED_OFF; break;
-            default: cmd->param1 = 255; cmd->param2 = 255; cmd->param3 = 255; break;
+            // 直接使用颜色枚举值
+            if (station_cmd->cmd_data[0] == LED_COLOR_OFF) {
+                cmd->type = CMD_LED_OFF;
+            } else {
+                cmd->type = CMD_LED_COLOR;
+                cmd->param1 = station_cmd->cmd_data[0]; // 颜色枚举值
             }
+        } else {
+            cmd->type = CMD_LED_COLOR;
+            cmd->param1 = LED_COLOR_WHITE; // 默认白色
         }
         break;
         
     case CMD_SET_BLINK_MODE:
-        // 这里可以根据需要实现闪烁模式
-        cmd->type = CMD_LED_BRIGHTNESS;
+        // 这里可以根据需要实现闪烁模式，映射为颜色控制
+        cmd->type = CMD_LED_COLOR;
         cmd->led_id = (uint8_t)(device_id & 0xFF);
         if (station_cmd->data_length >= 1) {
-            // 根据闪烁模式设置亮度
+            // 根据闪烁模式设置颜色，闪烁用白色表示
             switch (station_cmd->cmd_data[0]) {
-            case BLINK_MODE_NONE: cmd->param1 = 255; break; // 常亮
-            case BLINK_MODE_SLOW: cmd->param1 = 128; break; // 中等亮度
-            case BLINK_MODE_FAST: cmd->param1 = 64;  break; // 低亮度
-            default: cmd->param1 = 255; break;
+            case BLINK_MODE_NONE: cmd->param1 = LED_COLOR_WHITE; break; // 常亮白色
+            case BLINK_MODE_SLOW: cmd->param1 = LED_COLOR_YELLOW; break; // 慢闪用黄色
+            case BLINK_MODE_FAST: cmd->param1 = LED_COLOR_RED;  break; // 快闪用红色
+            default: cmd->param1 = LED_COLOR_WHITE; break;
             }
+        } else {
+            cmd->param1 = LED_COLOR_WHITE; // 默认白色
         }
         break;
         
@@ -257,7 +260,7 @@ void handle_led_strip_command(const ble_led_cmd_t *cmd)
 
     switch (cmd->type) {
     case CMD_LED_ON:
-        ESP_LOGI(BT_TAG, "Executing LED ON command for LED %d, duration: %d", cmd->led_id, cmd->param1);
+        ESP_LOGI(BT_TAG, "Executing LED ON command for LED %d", cmd->led_id);
         led_controller_turn_on(cmd->led_id);
         break;
 
@@ -266,16 +269,16 @@ void handle_led_strip_command(const ble_led_cmd_t *cmd)
         led_controller_turn_off(cmd->led_id);
         break;
 
-    case CMD_LED_BRIGHTNESS:
-        ESP_LOGI(BT_TAG, "Executing LED BRIGHTNESS command for LED %d, brightness: %d", 
+    case CMD_LED_COLOR:
+        ESP_LOGI(BT_TAG, "Executing LED COLOR command for LED %d, color: %d", 
                  cmd->led_id, cmd->param1);
-        led_controller_set_brightness(cmd->led_id, cmd->param1);
+        led_controller_set_color_simple(cmd->led_id, (led_color_t)cmd->param1);
         break;
 
-    case CMD_LED_COLOR:
-        ESP_LOGI(BT_TAG, "Executing LED COLOR command for LED %d, RGB: %d,%d,%d", 
-                 cmd->led_id, cmd->param1, cmd->param2, cmd->param3);
-        led_controller_set_color(cmd->led_id, cmd->param1, cmd->param2, cmd->param3);
+    case CMD_LED_COLOR_WITH_TIME:
+        ESP_LOGI(BT_TAG, "Executing LED COLOR WITH TIME command for LED %d, color: %d, duration: %lu ms", 
+                 cmd->led_id, cmd->param1, cmd->param2);
+        led_controller_set_color_with_time(cmd->led_id, (led_color_t)cmd->param1, cmd->param2);
         break;
 
     case CMD_SYSTEM_STATUS:
@@ -311,12 +314,12 @@ uint16_t create_led_status_frame(uint8_t *frame_buffer, uint16_t buffer_size)
     response_data.data[2] = (timestamp >> 8) & 0xFF;
     response_data.data[3] = timestamp & 0xFF;
     
-    // 添加LED状态 (最多4个LED，每个LED 3字节：ID + 开关 + 亮度)
+    // 添加LED状态 (最多4个LED，每个LED 3字节：ID + 开关 + 颜色)
     uint8_t status_idx = 4;
     for (int i = 1; i <= 4 && status_idx <= 12; i++) {
         response_data.data[status_idx++] = i; // LED ID
         response_data.data[status_idx++] = led_controller_is_on(i) ? 1 : 0; // 开关状态
-        response_data.data[status_idx++] = led_controller_get_brightness(i); // 亮度
+        response_data.data[status_idx++] = (uint8_t)led_controller_get_color(i); // 颜色
     }
     
     return protocol_frame_pack(frame_buffer, (uint8_t*)&response_data, sizeof(response_data));
