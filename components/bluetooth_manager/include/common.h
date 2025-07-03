@@ -128,4 +128,10 @@ typedef struct __attribute__((packed)) {
     uint8_t data[15];           // 数据内容(最大15字节)
 } strip_to_station_data_t;
 
+/* 协议帧处理函数声明 */
+uint16_t protocol_frame_pack(uint8_t *frame_buf, const uint8_t *data, uint16_t data_len);
+uint16_t protocol_frame_unpack(const uint8_t *frame_buf, uint16_t frame_len, uint8_t *data_buf, uint16_t data_buf_size);
+uint16_t checksum16_calculate(const uint8_t *data, uint16_t length);
+uint16_t create_response_frame(uint8_t cmd_type, uint16_t device_id, const uint8_t *data, uint8_t data_len, uint8_t *frame_buf, uint16_t frame_buf_size);
+
 #endif // BT_COMMON_H 

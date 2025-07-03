@@ -1,235 +1,325 @@
-# ESP32 Station BLE GATT 服务使用说明 - 灯条协议 V2.0
+# ESP32 基站 BLE Central 使用说明 - 灯条控制系统 V3.0
 
-基于 ESP-IDF v5.4.1 NimBLE GATT Server 例程开发的LED灯条控制系统，采用统一的灯条通信协议规范。
+基于 ESP-IDF v5.4.1 NimBLE Central 开发的智能基站系统，作为APP与多个LED灯条设备之间的蓝牙网关。
 
 ## 概述
 
-本项目实现了一个完整的BLE GATT服务器，用于通过蓝牙控制多个LED灯条。使用灯条协议规范V2.0，支持**16位UUID**、**16位和校验**和**帧头帧尾**保护机制。
+本项目实现了一个ESP32基站，使用BLE Central模式连接和管理多个LED灯条设备。基站同时支持WiFi+MQTT通信，作为移动APP和灯条设备之间的双向通信网关。
+
+## 系统架构
+
+```
+[移动APP] <-> [MQTT平台] <-> [WiFi] <-> [ESP32基站] <-> [BLE] <-> [灯条设备1-10]
+```
+
+### 核心功能
+- **BLE Central**: 主动扫描和连接多个灯条设备（最多10个）
+- **设备管理**: 自动发现、连接管理、状态监控
+- **MQTT网关**: 接收APP指令，转发给对应灯条设备
+- **双向通信**: 收集灯条状态，上报给MQTT平台
+- **灯条协议**: 使用标准灯条协议V2.0进行BLE通信
 
 ## 特性
 
-- **NimBLE栈**: 使用ESP-IDF的NimBLE蓝牙栈
-- **模块化设计**: 清晰分离GAP、GATT、管理器功能
-- **灯条协议V2.0**: 符合统一的灯条通信协议规范
-- **16位UUID**: 使用自定义16位UUID服务，节省广播空间
-- **16位和校验**: 使用累加和算法确保数据完整性
-- **多LED支持**: 支持控制多个LED灯条
-- **实时通知**: 支持状态变化实时通知
-- **错误处理**: 完善的错误处理和日志记录
+- **双重角色**: BLE Central + MQTT Client
+- **多设备管理**: 支持同时连接10个灯条设备
+- **自动重连**: 设备断线自动重连机制
+- **命令转发**: MQTT命令自动转换为灯条协议
+- **状态上报**: 实时收集和上报设备状态
+- **广播支持**: 支持向所有设备广播命令
 
 ## 项目结构
 
 ```
 components/bluetooth_manager/
 ├── include/
-│   ├── bluetooth_manager.h    # 主接口头文件
-│   ├── common.h              # 公共定义
-│   ├── gap.h                 # GAP服务头文件
-│   └── gatt_svc.h           # GATT服务头文件
-├── bluetooth_manager.c       # 主管理器实现
-├── gap.c                    # GAP服务实现
-├── gatt_svc.c              # GATT服务实现
+│   ├── bluetooth_manager.h    # BLE Central接口
+│   └── common.h              # 协议定义和公共类型
+├── bluetooth_manager.c       # BLE Central实现
 └── CMakeLists.txt          # 组件构建配置
+
+main/
+├── main.c                   # 主程序入口
+└── CMakeLists.txt
+
+components/mqtt_manager/     # MQTT客户端管理
+components/led_controller/   # LED状态管理
+components/system_config/    # 系统配置管理
+components/ota_manager/      # OTA升级管理
 ```
 
-## GATT服务定义
+## 设备发现和连接
 
-### 服务UUID (16位)
-- **无线灯条控制服务**: `0x00FF`
+### 目标设备识别
+基站通过设备名称前缀识别灯条设备：
+- **设备名前缀**: `SmartTag`
+- **服务UUID**: `0x00FF` (LED控制服务)
 
-### 特征值 (16位UUID)
+### 连接管理
+- **最大连接数**: 10个设备
+- **设备ID范围**: 1-10
+- **连接超时**: 5秒
+- **扫描周期**: 10秒（无设备时）
 
-| 特征值 | UUID | 权限 | 描述 |
+## 灯条协议通信
+
+### BLE GATT特征值
+
+| 特征值 | UUID | 用途 | 方向 |
 |-------|------|------|------|
-| 命令特征 | `0xFF01` | Write, Write Without Response | 接收灯条协议命令 |
-| 响应特征 | `0xFF02` | Notify | 发送状态和响应数据 |
+| 命令特征 | `0xFF01` | 发送控制命令 | 基站→灯条 |
+| 通知特征 | `0xFF02` | 接收状态响应 | 灯条→基站 |
 
-## 灯条协议格式
+### 协议帧格式
 
-### 协议帧结构
-
+基站使用标准灯条协议V2.0：
 ```
-[帧头AA55] [长度] [数据0-18] [校验_H] [校验_L] [帧尾55AA]
-```
-
-| 字段     | 长度(字节) | 说明                              |
-|----------|------------|-----------------------------------|
-| 帧头     | 2          | 固定为 AA 55                      |
-| 长度     | 1          | 数据部分的长度(不包含帧头、长度、校验、帧尾) |
-| 数据     | 0-18       | 实际数据内容                      |
-| 校验和   | 2          | 数据部分的16位和校验(大端格式)      |
-| 帧尾     | 2          | 固定为 55 AA                      |
-
-### 16位和校验算法
-
-- **算法**: 累加和取反
-- **计算方式**: 所有数据字节累加，进位回卷，最后取反
-- **校验范围**: 仅对数据部分进行校验
-- **字节序**: 大端格式(高字节在前)
-
-## 命令类型定义
-
-| 命令类型 | 值 | 说明 |
-|---------|---|------|
-| CMD_SET_LIGHT_DURATION | 0x01 | 设置亮灯时长 |
-| CMD_SET_LIGHT_COLOR | 0x02 | 设置亮灯颜色 |
-| CMD_SET_BLINK_MODE | 0x03 | 设置闪烁模式 |
-| CMD_SET_BEEP_STATE | 0x04 | 设置蜂鸣器状态 |
-| CMD_SET_CONTROL_MODE | 0x05 | 设置控制模式 |
-| CMD_GET_BATTERY_STATUS | 0x06 | 获取/上报电池状态 |
-| CMD_BATTERY_LOW_ALERT | 0x07 | 电池电量低警报 |
-
-### 颜色值定义
-
-| 颜色 | 值 | RGB映射 |
-|-----|---|---------|
-| 红色 | 0x00 | 255,0,0 |
-| 绿色 | 0x01 | 0,255,0 |
-| 蓝色 | 0x02 | 0,0,255 |
-| 黄色 | 0x03 | 255,255,0 |
-| 紫色 | 0x04 | 255,0,255 |
-| 青色 | 0x05 | 0,255,255 |
-| 白色 | 0x06 | 255,255,255 |
-| 关闭 | 0x07 | LED_OFF |
-
-## 命令示例
-
-### 设置LED颜色为红色
-**基站发送:**
-```
-数据部分: 02 01 00 01 00
-校验计算: 0x02+0x01+0x00+0x01+0x00=0x04, ~0x04=0xFFFB
-完整帧: AA 55 05 02 01 00 01 00 FF FB 55 AA
+[帧头AA55] [长度] [命令数据] [校验_H] [校验_L] [帧尾55AA]
 ```
 
-### 设置亮灯时长30秒
-**基站发送:**
+## MQTT命令接口
+
+### 1. 设备管理命令
+
+#### 扫描设备
+```json
+{"cmd":"SCAN_DEVICES"}
 ```
-数据部分: 01 02 00 01 00 1E
-校验计算: 0x01+0x02+0x00+0x01+0x00+0x1E=0x22, ~0x22=0xFFDD
-完整帧: AA 55 06 01 02 00 01 00 1E FF DD 55 AA
-```
 
-## 协议优势
-
-1. **标准化**: 统一的协议规范，与其他灯条设备兼容
-2. **可靠性**: 16位和校验确保数据完整性
-3. **扩展性**: 支持多种命令类型和参数
-4. **广播优化**: 16位UUID节省广播空间，解决31字节限制问题
-5. **调试友好**: 帧头帧尾便于协议调试，简单和校验算法便于手工验证
-
-## 版本信息
-
-- **协议版本**: 2.0 (与灯条协议规范兼容)
-- **ESP-IDF版本**: v5.4.1
-- **NimBLE栈**: 包含在ESP-IDF中
-- **UUID格式**: 16位自定义UUID (优化广播性能)
-
-## 使用方法
-
-### 1. 初始化
-
-```c
-#include "bluetooth_manager.h"
-
-// 初始化蓝牙管理器
-bt_mgr_err_t ret = bluetooth_manager_init();
-if (ret != BT_MGR_OK) {
-    ESP_LOGE(TAG, "Failed to initialize Bluetooth manager");
-    return;
-}
-
-// 启动蓝牙服务
-ret = bluetooth_manager_start();
-if (ret != BT_MGR_OK) {
-    ESP_LOGE(TAG, "Failed to start Bluetooth manager");
-    return;
+#### 连接设备
+```json
+{
+  "cmd":"CONNECT_DEVICE",
+  "mac":"aa:bb:cc:dd:ee:ff",
+  "device_id":1
 }
 ```
 
-### 2. 状态监控
-
-```c
-// 检查连接状态
-if (bluetooth_manager_is_connected()) {
-    // 发送状态通知
-    bluetooth_manager_notify_led_status();
+#### 断开设备
+```json
+{
+  "cmd":"DISCONNECT_DEVICE",
+  "device_id":1
 }
-
-// 获取管理器状态
-bt_mgr_state_t state = bluetooth_manager_get_state();
 ```
 
-### 3. 发送响应
+### 2. LED控制命令
 
-```c
-// 发送自定义响应
-bluetooth_manager_send_response("success", "Operation completed");
+#### 单设备颜色控制
+```json
+{
+  "cmd":"LED_CONTROL",
+  "device_id":1,
+  "color":"RED",
+  "duration":5000
+}
 ```
 
-## 客户端连接流程
+#### 单设备开关
+```json
+{"cmd":"LED_ON", "device_id":1}
+{"cmd":"LED_OFF", "device_id":1}
+```
 
-1. **扫描设备**: 查找名为 "ESP32_Station_BLE" 的设备
-2. **建立连接**: 连接到设备
-3. **服务发现**: 发现LED控制服务 (UUID: 0x00FF)
-4. **启用通知**: 订阅状态和响应特征值的通知
-5. **发送命令**: 向命令特征值写入二进制命令
-6. **接收响应**: 通过通知接收命令执行结果
+#### 广播控制
+```json
+{
+  "cmd":"BROADCAST",
+  "color":"BLUE",
+  "duration":3000
+}
+```
 
-## 校验和计算
+### 3. 状态查询
+```json
+{"cmd":"GET_STATUS"}
+```
 
-使用16位累加和校验：
+## 状态上报格式
+
+基站定期上报系统状态：
+```json
+{
+  "device_type":"station",
+  "connected_devices":3,
+  "max_devices":10,
+  "bt_state":3,
+  "system":{
+    "wifi":true,
+    "mqtt":true,
+    "bt_central":"ready",
+    "uptime":12345
+  }
+}
+```
+
+## API接口
+
+### 初始化和启动
 ```c
-uint16_t checksum16_calculate(const uint8_t *data, uint16_t length) {
-    uint32_t sum = 0;
-    
-    // 累加所有数据字节
-    for (uint16_t i = 0; i < length; i++) {
-        sum += data[i];
+// 初始化BLE Central
+bt_mgr_err_t bluetooth_manager_init(void);
+
+// 启动基站服务
+bt_mgr_err_t bluetooth_manager_start(void);
+
+// 设置回调函数
+bluetooth_manager_set_state_callback(device_state_cb);
+bluetooth_manager_set_response_callback(device_response_cb);
+```
+
+### 设备扫描和连接
+```c
+// 开始扫描
+bt_mgr_err_t bluetooth_manager_start_scan(
+    uint32_t duration_ms, 
+    device_found_cb_t found_cb
+);
+
+// 连接设备
+bt_mgr_err_t bluetooth_manager_connect_device(
+    const uint8_t *mac_addr, 
+    uint8_t device_id
+);
+```
+
+### 命令发送
+```c
+// 发送命令到指定设备
+bt_mgr_err_t bluetooth_manager_send_command(
+    uint8_t device_id, 
+    const led_command_t *cmd
+);
+
+// 广播命令到所有设备
+int bluetooth_manager_broadcast_command(const led_command_t *cmd);
+```
+
+### 状态查询
+```c
+// 获取连接的设备数量
+int bluetooth_manager_get_connected_count(void);
+
+// 获取设备信息
+const led_device_t* bluetooth_manager_get_device(uint8_t device_id);
+
+// 检查设备是否在线
+bool bluetooth_manager_is_device_online(uint8_t device_id);
+```
+
+## 设备状态管理
+
+### 设备状态枚举
+```c
+typedef enum {
+    LED_DEVICE_STATE_DISCONNECTED = 0,
+    LED_DEVICE_STATE_CONNECTING,
+    LED_DEVICE_STATE_CONNECTED,
+    LED_DEVICE_STATE_ERROR
+} led_device_state_t;
+```
+
+### 设备信息结构
+```c
+typedef struct {
+    uint8_t device_id;              // 设备ID (1-10)
+    uint8_t mac_addr[6];           // MAC地址
+    char name[32];                 // 设备名称
+    uint16_t conn_handle;          // 连接句柄
+    led_device_state_t state;      // 连接状态
+    int8_t rssi;                   // 信号强度
+    led_color_t current_color;     // 当前颜色
+    bool is_on;                    // 是否开启
+    uint8_t battery_level;         // 电池电量
+} led_device_t;
+```
+
+## 回调函数
+
+### 设备发现回调
+```c
+void on_device_found(const scan_result_t *result) {
+    ESP_LOGI(TAG, "Found LED device: %s, RSSI: %d", 
+             result->name, result->rssi);
+    // 可以实现自动连接逻辑
+}
+```
+
+### 状态变化回调
+```c
+void on_device_state_changed(uint8_t device_id, 
+                            led_device_state_t old_state, 
+                            led_device_state_t new_state) {
+    if (new_state == LED_DEVICE_STATE_CONNECTED) {
+        ESP_LOGI(TAG, "Device %d connected", device_id);
     }
-    
-    // 将进位加回到低16位
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    
-    // 返回16位和校验值（取反）
-    return ~((uint16_t)sum);
 }
 ```
 
-## 测试工具
+## 部署配置
 
-推荐使用以下工具进行测试：
+### ESP-IDF配置
+```bash
+# 启用BLE Central
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
 
-- **nRF Connect for Mobile** (Android/iOS)
-- **LightBlue Explorer** (iOS)
-- **BLE Scanner** (Android)
-- **自定义测试脚本** (Python + bleak库)
+# WiFi配置
+CONFIG_ESP_WIFI_ENABLED=y
 
-## 配置选项
-
-在 `sdkconfig.defaults` 中的关键配置：
-
+# 分区表
+CONFIG_PARTITION_TABLE_CUSTOM=y
 ```
-# 启用BLE
-CONFIG_BT_ENABLED=y
-CONFIG_BT_NIMBLE_ENABLED=y
 
-# 禁用经典蓝牙
-CONFIG_BT_CLASSIC_ENABLED=n
-
-# 启用NimBLE GATT服务器
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+### WiFi和MQTT配置
+在 `components/system_config/include/system_config.h` 中配置：
+```c
+#define WIFI_SSID "your_wifi_ssid"
+#define WIFI_PASSWORD "your_wifi_password"
+#define MQTT_BROKER_URL "mqtt://your_broker_ip"
+#define MQTT_USERNAME "your_username"
+#define MQTT_PASSWORD "your_password"
 ```
+
+## 使用流程
+
+### 1. 基站启动
+1. 初始化WiFi和MQTT连接
+2. 启动BLE Central服务
+3. 自动开始扫描LED设备
+
+### 2. 设备连接
+1. APP发送扫描命令：`{"cmd":"SCAN_DEVICES"}`
+2. 基站发现设备后，APP选择连接：`{"cmd":"CONNECT_DEVICE",...}`
+3. 基站建立BLE连接并上报状态
+
+### 3. 设备控制
+1. APP发送控制命令：`{"cmd":"LED_CONTROL",...}`
+2. 基站转换为灯条协议并通过BLE发送
+3. 收集设备响应并通过MQTT上报
 
 ## 故障排除
 
-1. **校验和错误**: 检查数据传输是否完整
-2. **无效命令**: 确认命令类型和参数格式正确
-3. **连接问题**: 检查BLE连接状态和通知订阅
-4. **数据长度**: 确保数据长度字段与实际参数长度一致
+### 常见问题
+1. **设备扫描不到**: 检查设备名称前缀匹配
+2. **连接失败**: 检查设备是否已连接到其他基站
+3. **命令无响应**: 检查设备ID和连接状态
+4. **MQTT断线**: 检查WiFi和MQTT配置
+
+### 调试日志
+```c
+// 启用调试日志
+esp_log_level_set("ESP32_Station_Central", ESP_LOG_DEBUG);
+esp_log_level_set("MQTT_MANAGER", ESP_LOG_DEBUG);
+```
+
+## 版本信息
+
+- **架构版本**: 3.0 (BLE Central + MQTT Gateway)
+- **协议版本**: 2.0 (兼容标准灯条协议)
+- **ESP-IDF版本**: v5.4.1
+- **最大设备数**: 10个
+- **UUID格式**: 16位自定义UUID
 
 ## 版本历史
 

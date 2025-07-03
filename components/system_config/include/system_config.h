@@ -12,22 +12,30 @@
 #define MAX_LED_STRIPS 10
 #define COMMAND_QUEUE_SIZE 20
 
-// WiFi配置
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+// WiFi配置 - 请修改为您的实际WiFi信息
+#define WIFI_SSID "您的WiFi名称"              // 修改为您的WiFi名称
+#define WIFI_PASSWORD "您的WiFi密码"          // 修改为您的WiFi密码
 #define WIFI_MAXIMUM_RETRY 5
 
-// MQTT配置
-#define MQTT_BROKER_URL "mqtt://your-mqtt-broker.com"
+// MQTT配置 - 可以使用免费的公共MQTT服务器进行测试
+#define MQTT_BROKER_URL "mqtt://broker.emqx.io"  // 免费公共MQTT服务器
 #define MQTT_PORT 1883
-#define MQTT_CLIENT_ID "esp32_station"
-#define MQTT_USERNAME "your_username"
-#define MQTT_PASSWORD "your_password"
+#define MQTT_CLIENT_ID "esp32_station_test"      // 添加唯一后缀避免冲突
+#define MQTT_USERNAME ""                         // 公共服务器通常不需要用户名
+#define MQTT_PASSWORD ""                         // 公共服务器通常不需要密码
 
-// MQTT主题
-#define MQTT_TOPIC_COMMAND "station/command"
-#define MQTT_TOPIC_STATUS "station/status"
-#define MQTT_TOPIC_RESPONSE "station/response"
+// 基站配置
+#define BASE_STATION_ID "0001"  // 基站唯一标识符
+
+// MQTT主题 - 符合平台协议规范
+#define MQTT_TOPIC_COMMAND_FORMAT "platform/to/base_station/%s/command"
+#define MQTT_TOPIC_STATUS_FORMAT "base_station/to/platform/%s/status"
+#define MQTT_TOPIC_EXCEPTION_FORMAT "base_station/to/platform/%s/exception"
+
+// 动态主题字符串
+extern char MQTT_TOPIC_COMMAND[64];
+extern char MQTT_TOPIC_STATUS[64];
+extern char MQTT_TOPIC_EXCEPTION[64];
 
 // 蓝牙配置 - BLE功能已启用
 #define BT_DEVICE_NAME "ESP32_Station"        // BLE设备名称
@@ -43,6 +51,14 @@
 #define BLE_PROTOCOL_FRAME_HEADER_2 0x55      // 协议帧头2
 #define BLE_PROTOCOL_FRAME_TAIL_1   0x55      // 协议帧尾1
 #define BLE_PROTOCOL_FRAME_TAIL_2   0xAA      // 协议帧尾2
+
+// BLE扫描配置 - 测试优化
+#define BLE_SCAN_DURATION_MS 10000            // BLE扫描持续时间(毫秒) - 每次扫描10秒
+#define BLE_SCAN_INTERVAL_MS 15000            // BLE扫描间隔(毫秒) - 每15秒扫描一次（测试用）
+
+// 任务堆栈大小配置
+#define STATUS_MONITOR_STACK_SIZE 4096        // 状态监控任务堆栈大小
+#define LED_CONTROLLER_STACK_SIZE 3072        // LED控制器任务堆栈大小
 
 // OTA配置
 #define OTA_URL_SIZE 256

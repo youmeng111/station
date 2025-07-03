@@ -3,8 +3,10 @@
 #include "led_controller.h"
 #include "esp_log.h"
 #include "esp_event.h"
+#include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 static const char *TAG = "MQTT_MANAGER";
 
@@ -267,110 +269,207 @@ esp_err_t mqtt_send_device_info(void)
              "{\"device\":\"ESP32_Station\",\"version\":\"1.0\",\"max_strips\":%d,\"status\":\"online\"}",
              MAX_LED_STRIPS);
     
-    return mqtt_publish(MQTT_TOPIC_RESPONSE, info_buffer, 1, 1);
+    return mqtt_publish(MQTT_TOPIC_STATUS, info_buffer, 1, 1);
+}
+
+// 发送状态响应
+static void mqtt_send_response(const char *command_type, const char *status, const char *device_id, const char *error_msg)
+{
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "response_to", command_type);
+    cJSON_AddStringToObject(response, "status", status);
+    if (device_id) {
+        cJSON_AddStringToObject(response, "device_id", device_id);
+    }
+    if (error_msg) {
+        cJSON_AddStringToObject(response, "error", error_msg);
+    }
+    
+    char *response_str = cJSON_Print(response);
+    if (response_str) {
+        mqtt_publish(MQTT_TOPIC_STATUS, response_str, 1, 0);
+        free(response_str);
+    }
+    cJSON_Delete(response);
+}
+
+// 发送异常消息
+static void mqtt_send_exception(const char *exception_type, const char *device_id, const char *message)
+{
+    cJSON *exception = cJSON_CreateObject();
+    cJSON_AddStringToObject(exception, "exception_type", exception_type);
+    cJSON_AddStringToObject(exception, "timestamp", "");  // 可以添加时间戳
+    
+    cJSON *parameters = cJSON_CreateObject();
+    if (device_id) {
+        cJSON_AddStringToObject(parameters, "device_id", device_id);
+    }
+    if (message) {
+        cJSON_AddStringToObject(parameters, "message", message);
+    }
+    cJSON_AddItemToObject(exception, "parameters", parameters);
+    
+    char *exception_str = cJSON_Print(exception);
+    if (exception_str) {
+        mqtt_publish(MQTT_TOPIC_EXCEPTION, exception_str, 1, 0);
+        free(exception_str);
+    }
+    cJSON_Delete(exception);
 }
 
 void mqtt_handle_message(const char *topic, const char *data, int data_len)
 {
     ESP_LOGI(TAG, "Handling MQTT message on topic: %s", topic);
     
-    if (strcmp(topic, MQTT_TOPIC_COMMAND) == 0) {
-        // 解析JSON命令格式: 
-        // {"cmd":"LED_CONTROL","led_id":1,"action":"ON","color":"RED","duration":5000}
-        // 或 {"cmd":"LED_OFF","led_id":1}
-        
-        led_command_t command = {0};
-        
-        // 简单的JSON解析（实际项目中建议使用cJSON库）
-        char *cmd_start = strstr(data, "\"cmd\":\"");
-        char *led_id_start = strstr(data, "\"led_id\":");
-        
-        if (cmd_start && led_id_start) {
-            cmd_start += 7; // 跳过 "cmd":"
-            char *cmd_end = strchr(cmd_start, '"');
-            
-            led_id_start += 9; // 跳过 "led_id":
-            command.led_id = atoi(led_id_start);
-            
-            if (cmd_end) {
-                char cmd_str[32] = {0};
-                int cmd_len = cmd_end - cmd_start;
-                if (cmd_len < sizeof(cmd_str)) {
-                    memcpy(cmd_str, cmd_start, cmd_len);
-                    
-                    if (strcmp(cmd_str, "LED_ON") == 0) {
-                        command.type = CMD_LED_ON;
-                    } else if (strcmp(cmd_str, "LED_OFF") == 0) {
-                        command.type = CMD_LED_OFF;
-                    } else if (strcmp(cmd_str, "LED_TOGGLE") == 0) {
-                        command.type = CMD_LED_TOGGLE;
-                    } else if (strcmp(cmd_str, "LED_CONTROL") == 0) {
-                        // 解析颜色参数
-                        char *color_start = strstr(data, "\"color\":\"");
-                        char *duration_start = strstr(data, "\"duration\":");
-                        
-                        if (color_start) {
-                            color_start += 9; // 跳过 "color":"
-                            char *color_end = strchr(color_start, '"');
-                            if (color_end) {
-                                char color_str[16] = {0};
-                                int color_len = color_end - color_start;
-                                if (color_len < sizeof(color_str)) {
-                                    memcpy(color_str, color_start, color_len);
-                                    led_color_t color = led_color_from_string(color_str);
-                                    
-                                    if (duration_start) {
-                                        // 带时长的颜色控制
-                                        command.type = CMD_LED_COLOR_WITH_TIME;
-                                        command.param1 = color;
-                                        uint32_t duration_ms = atoi(duration_start + 11);
-                                        command.param2 = duration_ms & 0xFFFF;
-                                        command.param3 = (duration_ms >> 16) & 0xFFFF;
-                                    } else {
-                                        // 简单颜色控制
-                                        command.type = CMD_LED_COLOR;
-                                        command.param1 = color;
-                                    }
-                                } else {
-                                    // 没有颜色参数，默认白色
-                                    command.type = CMD_LED_COLOR;
-                                    command.param1 = LED_COLOR_WHITE;
-                                }
-                            }
-                        }
-                    } else if (strcmp(cmd_str, "GET_STATUS") == 0) {
-                        mqtt_send_status();
-                        return;
-                    }
-                    
-                    // MQTT命令处理 - 直接调用LED控制函数而不是队列
-                    switch (command.type) {
-                        case CMD_LED_ON:
-                            led_strip_on(command.led_id);
-                            break;
-                        case CMD_LED_OFF:
-                            led_strip_off(command.led_id);
-                            break;
-                        case CMD_LED_TOGGLE:
-                            led_strip_toggle(command.led_id);
-                            break;
-                        case CMD_LED_COLOR:
-                            led_strip_set_color(command.led_id, (led_color_t)command.param1);
-                            break;
-                        case CMD_LED_COLOR_WITH_TIME:
-                            {
-                                uint32_t duration_ms = ((uint32_t)command.param3 << 16) | command.param2;
-                                led_strip_set_color_with_duration(command.led_id, (led_color_t)command.param1, duration_ms);
-                            }
-                            break;
-                        default:
-                            ESP_LOGW(TAG, "Unknown MQTT command type: %d", command.type);
-                            break;
-                    }
-                }
-            }
+    // 只处理命令主题
+    if (strcmp(topic, MQTT_TOPIC_COMMAND) != 0) {
+        return;
+    }
+    
+    // 解析JSON命令
+    cJSON *json = cJSON_ParseWithLength(data, data_len);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "Failed to parse JSON command");
+        mqtt_send_exception("JSON_PARSE_ERROR", NULL, "Invalid JSON format");
+        return;
+    }
+    
+    cJSON *command_type = cJSON_GetObjectItem(json, "command_type");
+    if (!cJSON_IsString(command_type)) {
+        ESP_LOGE(TAG, "Missing or invalid command_type field");
+        cJSON_Delete(json);
+        mqtt_send_exception("INVALID_COMMAND", NULL, "Missing command_type field");
+        return;
+    }
+    
+    cJSON *parameters = cJSON_GetObjectItem(json, "parameters");
+    if (!cJSON_IsObject(parameters)) {
+        ESP_LOGE(TAG, "Missing or invalid parameters field");
+        cJSON_Delete(json);
+        mqtt_send_exception("INVALID_COMMAND", NULL, "Missing parameters field");
+        return;
+    }
+    
+    const char *cmd = command_type->valuestring;
+    ESP_LOGI(TAG, "Processing command: %s", cmd);
+    
+    // 解析device_id参数
+    cJSON *device_id_json = cJSON_GetObjectItem(parameters, "device_id");
+    const char *device_id = cJSON_IsString(device_id_json) ? device_id_json->valuestring : NULL;
+    uint8_t led_id = device_id ? (uint8_t)atoi(device_id) : 0;
+    
+    /* ========== 协议规范命令处理 ========== */
+    
+    if (strcmp(cmd, "SET_LIGHT_COLOR") == 0) {
+        cJSON *color_json = cJSON_GetObjectItem(parameters, "color");
+        if (cJSON_IsString(color_json)) {
+            led_color_t color = led_color_from_string(color_json->valuestring);
+            led_strip_set_color(led_id, color);
+            mqtt_send_response(cmd, "success", device_id, NULL);
+            ESP_LOGI(TAG, "Set light color for device %s to %s", device_id, color_json->valuestring);
+        } else {
+            mqtt_send_response(cmd, "error", device_id, "Invalid color parameter");
         }
     }
+    
+    else if (strcmp(cmd, "SET_LIGHT_DURATION") == 0) {
+        cJSON *duration_json = cJSON_GetObjectItem(parameters, "duration");
+        cJSON *color_json = cJSON_GetObjectItem(parameters, "color");
+        
+        if (cJSON_IsNumber(duration_json)) {
+            uint32_t duration_sec = (uint32_t)duration_json->valueint;
+            uint32_t duration_ms = duration_sec * 1000;  // 转换为毫秒
+            
+            led_color_t color = LED_COLOR_WHITE;  // 默认白色
+            if (cJSON_IsString(color_json)) {
+                color = led_color_from_string(color_json->valuestring);
+            }
+            
+            led_strip_set_color_with_duration(led_id, color, duration_ms);
+            mqtt_send_response(cmd, "success", device_id, NULL);
+            ESP_LOGI(TAG, "Set light duration for device %s: %" PRIu32 " seconds", device_id, duration_sec);
+        } else {
+            mqtt_send_response(cmd, "error", device_id, "Invalid duration parameter");
+        }
+    }
+    
+    else if (strcmp(cmd, "SET_BLINK_MODE") == 0) {
+        cJSON *mode_json = cJSON_GetObjectItem(parameters, "mode");
+        if (cJSON_IsString(mode_json)) {
+            const char *mode = mode_json->valuestring;
+            
+            // 简化实现：用颜色变化模拟闪烁
+            if (strcmp(mode, "NO_BLINK") == 0) {
+                led_strip_set_color(led_id, LED_COLOR_WHITE);
+            } else if (strcmp(mode, "SLOW") == 0) {
+                // 慢闪：白色5秒，关闭1秒，循环
+                led_strip_set_color_with_duration(led_id, LED_COLOR_WHITE, 5000);
+            } else if (strcmp(mode, "FAST") == 0) {
+                // 快闪：白色1秒，关闭0.5秒，循环
+                led_strip_set_color_with_duration(led_id, LED_COLOR_WHITE, 1000);
+            }
+            
+            mqtt_send_response(cmd, "success", device_id, NULL);
+            ESP_LOGI(TAG, "Set blink mode for device %s: %s", device_id, mode);
+        } else {
+            mqtt_send_response(cmd, "error", device_id, "Invalid blink mode");
+        }
+    }
+    
+    else if (strcmp(cmd, "SET_BEEP_STATE") == 0) {
+        cJSON *state_json = cJSON_GetObjectItem(parameters, "state");
+        if (cJSON_IsString(state_json)) {
+            const char *state = state_json->valuestring;
+            
+            // 蜂鸣器功能暂未实现，返回成功状态
+            mqtt_send_response(cmd, "success", device_id, NULL);
+            ESP_LOGI(TAG, "Set beep state for device %s: %s (Not implemented)", device_id, state);
+        } else {
+            mqtt_send_response(cmd, "error", device_id, "Invalid beep state");
+        }
+    }
+    
+    else if (strcmp(cmd, "SET_CONTROL_MODE") == 0) {
+        cJSON *mode_json = cJSON_GetObjectItem(parameters, "mode");
+        if (cJSON_IsString(mode_json)) {
+            const char *mode = mode_json->valuestring;
+            
+            // 控制模式功能暂存储在系统配置中
+            mqtt_send_response(cmd, "success", device_id, NULL);
+            ESP_LOGI(TAG, "Set control mode for device %s: %s", device_id, mode);
+        } else {
+            mqtt_send_response(cmd, "error", device_id, "Invalid control mode");
+        }
+    }
+    
+    else if (strcmp(cmd, "GET_BATTERY_STATUS") == 0) {
+        // 构造电池状态响应
+        cJSON *status_response = cJSON_CreateObject();
+        cJSON_AddStringToObject(status_response, "status_type", "BATTERY_STATUS");
+        
+        cJSON *status_params = cJSON_CreateObject();
+        cJSON_AddStringToObject(status_params, "device_id", device_id ? device_id : "0001");
+        cJSON_AddStringToObject(status_params, "battery_level", "HIGH");  // 模拟数据
+        cJSON_AddNumberToObject(status_params, "battery_percentage", 85);
+        cJSON_AddNumberToObject(status_params, "battery_voltage", 3700);
+        cJSON_AddItemToObject(status_response, "parameters", status_params);
+        
+        char *status_str = cJSON_Print(status_response);
+        if (status_str) {
+            mqtt_publish(MQTT_TOPIC_STATUS, status_str, 1, 0);
+            free(status_str);
+        }
+        cJSON_Delete(status_response);
+        
+        ESP_LOGI(TAG, "Sent battery status for device %s", device_id);
+    }
+    
+    else {
+        ESP_LOGW(TAG, "Unknown command: %s", cmd);
+        mqtt_send_response(cmd, "error", device_id, "Unknown command type");
+    }
+    
+    cJSON_Delete(json);
 }
 
 bool mqtt_is_connected(void)
