@@ -45,4 +45,4 @@ void system_config_init(void)
              MQTT_TOPIC_EXCEPTION_FORMAT, BASE_STATION_ID);
     
     ESP_LOGI(STATION_TAG, "System configuration initialized");
-}
+} 

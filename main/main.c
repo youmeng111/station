@@ -89,9 +89,9 @@ static void on_device_state_changed(uint8_t device_id, led_device_state_t old_st
             
             // 发送测试命令 - 设置为绿色3秒
             led_command_t test_cmd = {
-                .type = CMD_LED_COLOR_WITH_TIME,
+                .type = CMD_LED_COLOR_WITH_TIME,  // 使用system_config.h中定义的命令类型
                 .led_id = device_id,
-                .param1 = 2, // LED_COLOR_GREEN
+                .param1 = LED_COLOR_GREEN, // 绿色
                 .param2 = 3000, // 3秒 (低16位)
                 .param3 = 0     // 3秒 (高16位)
             };
@@ -203,7 +203,7 @@ static void status_monitor_task(void *param) {
         /* 发送状态到MQTT（如果连接） */
         if (g_system_status.mqtt_connected && (g_system_status.uptime_seconds % 60 == 0)) {
             mqtt_send_status();
-        }
+}
     }
 }
 

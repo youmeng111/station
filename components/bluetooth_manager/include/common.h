@@ -48,17 +48,16 @@
 #define PROTOCOL_FRAME_HEADER_2 0x55
 #define PROTOCOL_FRAME_TAIL_1   0x55
 #define PROTOCOL_FRAME_TAIL_2   0xAA
-#define MAX_PROTOCOL_DATA_LENGTH 18
-#define MAX_PROTOCOL_FRAME_LENGTH (MAX_PROTOCOL_DATA_LENGTH + 7) // 帧头(2) + 长度(1) + 数据(18) + 校验(2) + 帧尾(2)
+#define MAX_PROTOCOL_DATA_LENGTH 32  // 最大数据长度32字节
+#define MAX_PROTOCOL_FRAME_LENGTH (MAX_PROTOCOL_DATA_LENGTH + 4) // 帧头(2) + 数据(32) + 帧尾(2)
 
 /* 灯条协议命令类型定义 */
-#define CMD_SET_LIGHT_DURATION  0x01  // 设置亮灯时长
-#define CMD_SET_LIGHT_COLOR     0x02  // 设置亮灯颜色
-#define CMD_SET_BLINK_MODE      0x03  // 设置闪烁模式
-#define CMD_SET_BEEP_STATE      0x04  // 设置蜂鸣器状态
-#define CMD_SET_CONTROL_MODE    0x05  // 设置控制模式
-#define CMD_GET_BATTERY_STATUS  0x06  // 获取/上报电池状态
-#define CMD_BATTERY_LOW_ALERT   0x07  // 电池电量低警报
+#define CMD_TEST_SIMPLE       0x01  // 简单测试命令
+#define CMD_SET_LIGHT_COLOR   0x02  // 设置亮灯颜色
+#define CMD_SET_BLINK_MODE    0x03  // 设置闪烁模式
+#define CMD_SET_BEEP_STATE    0x04  // 设置蜂鸣器状态
+#define CMD_GET_BATTERY_STATUS 0x06  // 获取/上报电池状态
+#define CMD_BATTERY_LOW_ALERT 0x07  // 电池电量低警报
 
 /* 灯条颜色定义 */
 #define LED_COLOR_RED     0x00
@@ -98,8 +97,7 @@
 #define PROTOCOL_ERR_FRAME_HEAD     0x01
 #define PROTOCOL_ERR_FRAME_TAIL     0x02
 #define PROTOCOL_ERR_LENGTH         0x03
-#define PROTOCOL_ERR_CHECKSUM       0x04
-#define PROTOCOL_ERR_BUFFER_FULL    0x05
+#define PROTOCOL_ERR_BUFFER_FULL    0x04
 
 /* LED命令结构 - 使用system_config.h中的定义 */
 typedef led_command_t ble_led_cmd_t;
@@ -107,9 +105,7 @@ typedef led_command_t ble_led_cmd_t;
 /* 灯条协议帧结构 */
 typedef struct __attribute__((packed)) {
     uint8_t header[2];          // 帧头 AA 55
-    uint8_t length;             // 数据长度
     uint8_t data[MAX_PROTOCOL_DATA_LENGTH]; // 数据部分
-    uint16_t checksum;          // 16位和校验(大端格式)
     uint8_t tail[2];            // 帧尾 55 AA
 } protocol_frame_t;
 
@@ -118,20 +114,19 @@ typedef struct __attribute__((packed)) {
     uint8_t cmd_type;           // 命令类型
     uint8_t data_length;        // 数据长度
     uint16_t device_id;         // 设备ID(大端格式)
-    uint8_t cmd_data[14];       // 命令数据(最大14字节)
+    uint8_t cmd_data[28];       // 命令数据(最大28字节)
 } station_to_strip_cmd_t;
 
 /* 灯条发送到基站的数据结构 */
 typedef struct __attribute__((packed)) {
     uint8_t cmd_type;           // 命令类型
     uint16_t device_id;         // 设备ID(大端格式)
-    uint8_t data[15];           // 数据内容(最大15字节)
+    uint8_t data[29];           // 数据内容(最大29字节)
 } strip_to_station_data_t;
 
 /* 协议帧处理函数声明 */
 uint16_t protocol_frame_pack(uint8_t *frame_buf, const uint8_t *data, uint16_t data_len);
 uint16_t protocol_frame_unpack(const uint8_t *frame_buf, uint16_t frame_len, uint8_t *data_buf, uint16_t data_buf_size);
-uint16_t checksum16_calculate(const uint8_t *data, uint16_t length);
 uint16_t create_response_frame(uint8_t cmd_type, uint16_t device_id, const uint8_t *data, uint8_t data_len, uint8_t *frame_buf, uint16_t frame_buf_size);
 
 #endif // BT_COMMON_H 

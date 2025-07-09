@@ -129,34 +129,17 @@ ble_gatts_char_md_t notify_char_md = {
 ### 🏷️ **协议帧结构**
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ 帧头 │ 长度 │      数据部分      │   校验   │ 帧尾 │
-│ AA55 │  L   │    Data(0-18)     │ CRC16H/L │ 55AA │
-├──────┼──────┼───────────────────┼──────────┼──────┤
-│ 2字节│ 1字节│     L字节         │  2字节   │ 2字节│
+│ 帧头 │ 长度 │      数据部分      │ 帧尾 │
+│ AA55 │  L   │    Data(0-18)     │ 55AA │
+├──────┼──────┼───────────────────┼──────┤
+│ 2字节│ 1字节│     L字节         │ 2字节│
 └────────────────────────────────────────────────────────────┘
-总长度：7 + L 字节 (最大25字节)
+总长度：5 + L 字节 (最大23字节)
 ```
 
-### 🔢 **校验和计算方法**
+### 🔧 **协议帧处理函数**
 ```c
-// 16位累加和校验（大端格式）
-uint16_t checksum16_calculate(const uint8_t *data, uint16_t length) {
-    uint32_t sum = 0;
-    
-    // 对所有数据字节进行累加
-    for (uint16_t i = 0; i < length; i++) {
-        sum += data[i];
-    }
-    
-    // 处理溢出，将高位加到低位
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    
-    return (uint16_t)sum;
-}
-
-// 协议帧打包函数
+// 协议帧打包函数 - 简化版本（无校验位）
 uint16_t protocol_frame_pack(uint8_t *frame_buf, const uint8_t *data, uint16_t data_len) {
     if (!frame_buf || !data || data_len > MAX_PROTOCOL_DATA_LENGTH) {
         return 0;
@@ -169,23 +152,16 @@ uint16_t protocol_frame_pack(uint8_t *frame_buf, const uint8_t *data, uint16_t d
     // 复制数据
     memcpy(&frame_buf[3], data, data_len);
     
-    // 计算校验和（包含长度和数据）
-    uint16_t checksum = checksum16_calculate(&frame_buf[2], data_len + 1);
+    frame_buf[3 + data_len] = 0x55;         // 帧尾1
+    frame_buf[4 + data_len] = 0xAA;         // 帧尾2
     
-    // 大端格式存储校验和
-    frame_buf[3 + data_len] = (checksum >> 8) & 0xFF;      // 高字节
-    frame_buf[4 + data_len] = checksum & 0xFF;             // 低字节
-    
-    frame_buf[5 + data_len] = 0x55;         // 帧尾1
-    frame_buf[6 + data_len] = 0xAA;         // 帧尾2
-    
-    return 7 + data_len;                    // 返回总帧长度
+    return 5 + data_len;                    // 返回总帧长度
 }
 
-// 协议帧解包函数
+// 协议帧解包函数 - 简化版本（无校验位）
 uint16_t protocol_frame_unpack(const uint8_t *frame_buf, uint16_t frame_len, 
                               uint8_t *data_buf, uint16_t data_buf_size) {
-    if (!frame_buf || !data_buf || frame_len < 7) {
+    if (!frame_buf || !data_buf || frame_len < 5) {
         return 0;
     }
     
@@ -197,21 +173,13 @@ uint16_t protocol_frame_unpack(const uint8_t *frame_buf, uint16_t frame_len,
     uint8_t data_len = frame_buf[2];
     
     // 检查长度合法性
-    if (data_len > MAX_PROTOCOL_DATA_LENGTH || (7 + data_len) != frame_len) {
+    if (data_len > MAX_PROTOCOL_DATA_LENGTH || (5 + data_len) != frame_len) {
         return 0;  // 长度错误
     }
     
     // 检查帧尾
-    if (frame_buf[5 + data_len] != 0x55 || frame_buf[6 + data_len] != 0xAA) {
+    if (frame_buf[3 + data_len] != 0x55 || frame_buf[4 + data_len] != 0xAA) {
         return 0;  // 帧尾错误
-    }
-    
-    // 验证校验和
-    uint16_t calculated_checksum = checksum16_calculate(&frame_buf[2], data_len + 1);
-    uint16_t received_checksum = ((uint16_t)frame_buf[3 + data_len] << 8) | frame_buf[4 + data_len];
-    
-    if (calculated_checksum != received_checksum) {
-        return 0;  // 校验和错误
     }
     
     // 复制数据
@@ -453,7 +421,6 @@ uint8_t test_frame[] = {
     0xAA, 0x55,           // 帧头
     0x06,                 // 数据长度
     0x02, 0x06, 0x00, 0x01, 0x01, 0x00, // 数据部分
-    0x00, 0x0C,           // 校验和
     0x55, 0xAA            // 帧尾
 };
 ```
@@ -468,8 +435,7 @@ uint8_t test_frame[] = {
 #define PROTOCOL_ERR_FRAME_HEAD     0x01  // 帧头错误
 #define PROTOCOL_ERR_FRAME_TAIL     0x02  // 帧尾错误
 #define PROTOCOL_ERR_LENGTH         0x03  // 长度错误
-#define PROTOCOL_ERR_CHECKSUM       0x04  // 校验和错误
-#define PROTOCOL_ERR_BUFFER_FULL    0x05  // 缓冲区满
+#define PROTOCOL_ERR_BUFFER_FULL    0x04  // 缓冲区满
 ```
 
 ### 🔧 **故障排除指南**
@@ -490,8 +456,8 @@ uint8_t test_frame[] = {
 
 4. **数据传输错误**
    - 检查MTU大小配置
-   - 验证校验和计算
    - 确认数据长度正确
+   - 验证帧头帧尾格式
 
 ---
 
@@ -510,7 +476,7 @@ uint8_t test_frame[] = {
 - 缓存未发送数据
 
 ### 🛡️ **可靠性保证**
-- 实现协议校验
+- 实现帧头帧尾验证
 - 添加命令确认机制
 - 处理异常断开
 - 记录关键状态

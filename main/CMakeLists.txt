@@ -1,6 +1,13 @@
-set(srcs "main.c")
+# 选择要编译的主文件
+# 取消注释下面的行来使用不同的主程序
 
-idf_component_register(SRCS "${srcs}"
+# 使用原始主程序
+# set(MAIN_SRCS "main.c")
+
+# 使用LED颜色测试Demo
+set(MAIN_SRCS "led_color_test_demo.c")
+
+idf_component_register(SRCS ${MAIN_SRCS}
                        INCLUDE_DIRS "."
                        REQUIRES led_controller
                                 mqtt_manager

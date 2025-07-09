@@ -352,7 +352,7 @@ void mqtt_handle_message(const char *topic, const char *data, int data_len)
     
     const char *cmd = command_type->valuestring;
     ESP_LOGI(TAG, "Processing command: %s", cmd);
-    
+        
     // 解析device_id参数
     cJSON *device_id_json = cJSON_GetObjectItem(parameters, "device_id");
     const char *device_id = cJSON_IsString(device_id_json) ? device_id_json->valuestring : NULL;
@@ -426,7 +426,7 @@ void mqtt_handle_message(const char *topic, const char *data, int data_len)
             ESP_LOGI(TAG, "Set beep state for device %s: %s (Not implemented)", device_id, state);
         } else {
             mqtt_send_response(cmd, "error", device_id, "Invalid beep state");
-        }
+                        }
     }
     
     else if (strcmp(cmd, "SET_CONTROL_MODE") == 0) {
@@ -458,7 +458,7 @@ void mqtt_handle_message(const char *topic, const char *data, int data_len)
         if (status_str) {
             mqtt_publish(MQTT_TOPIC_STATUS, status_str, 1, 0);
             free(status_str);
-        }
+                    }
         cJSON_Delete(status_response);
         
         ESP_LOGI(TAG, "Sent battery status for device %s", device_id);
@@ -467,7 +467,7 @@ void mqtt_handle_message(const char *topic, const char *data, int data_len)
     else {
         ESP_LOGW(TAG, "Unknown command: %s", cmd);
         mqtt_send_response(cmd, "error", device_id, "Unknown command type");
-    }
+                    }
     
     cJSON_Delete(json);
 }

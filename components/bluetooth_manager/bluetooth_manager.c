@@ -53,10 +53,11 @@ static led_device_t* find_device_by_id(uint8_t device_id);
 static led_device_t* find_device_by_conn_handle(uint16_t conn_handle);
 static led_device_t* find_device_by_mac(const uint8_t *mac_addr);
 static led_device_t* allocate_device_slot(void);
-static void update_device_state(led_device_t *device, led_device_state_t new_state);
 static void clear_device_slot(led_device_t *device);
 static int blecent_on_gatt_disc_svc(uint16_t conn_handle, const struct ble_gatt_error *error,
                                     const struct ble_gatt_svc *service, void *arg);
+static int blecent_on_gatt_disc_chr(uint16_t conn_handle, const struct ble_gatt_error *error,
+                                    const struct ble_gatt_chr *chr, void *arg);
 static void debug_parse_adv_data(const uint8_t *data, uint8_t len);
 
 /* 初始化蓝牙管理器 */
@@ -405,12 +406,12 @@ bt_mgr_err_t bluetooth_manager_connect_device_with_type(const uint8_t *mac_addr,
             case 15: // BLE_HS_EBUSY
                 ESP_LOGE(TAG, "BLE stack is busy, try again later");
                 break;
-            default:
+    default:
                 ESP_LOGE(TAG, "Other BLE error, check device availability");
                 ESP_LOGE(TAG, "Possible causes: device out of range, interference, or device-side issues");
-                break;
-        }
-        
+        break;
+    }
+
         xSemaphoreTake(g_devices_mutex, portMAX_DELAY);
         clear_device_slot(device);
         xSemaphoreGive(g_devices_mutex);
@@ -483,21 +484,39 @@ bt_mgr_err_t bluetooth_manager_send_command(uint8_t device_id, const led_command
         return BT_MGR_ERR_CONNECT_FAILED;
     }
     
-    // 简化的命令发送 - 发送基本的颜色命令
-    uint8_t cmd_data[4];
-    cmd_data[0] = cmd->type;
-    cmd_data[1] = device_id;
-    cmd_data[2] = cmd->param1 & 0xFF;  // 颜色值
-    cmd_data[3] = (cmd->param2 >> 8) & 0xFF;  // 时长高字节
+    // 使用协议帧格式发送命令
+    uint8_t frame_buf[40];
+    uint8_t cmd_data[7];  // 根据协议文档，命令数据7字节：命令类型(1) + 数据长度(1) + 设备ID(2) + 颜色(1) + 持续时间(2)
     
-    ESP_LOGI(TAG, "Sending command to device ID %d: type=%d, param1=%u, param2=%lu", 
-             device_id, cmd->type, cmd->param1, cmd->param2);
-    ESP_LOG_BUFFER_HEX(TAG, cmd_data, sizeof(cmd_data));
+    // 根据协议文档构建命令数据
+    cmd_data[0] = CMD_SET_LIGHT_COLOR;        // 命令类型：设置亮灯颜色
+    cmd_data[1] = 0x05;                         // 数据长度：5字节
+    cmd_data[2] = (device_id >> 8) & 0xFF;     // 设备ID高字节
+    cmd_data[3] = device_id & 0xFF;            // 设备ID低字节
+    cmd_data[4] = cmd->param1 & 0xFF;          // 颜色值
+    // 持续时间转换为秒（大端格式）
+    uint16_t duration_sec = (cmd->param2 + 999) / 1000;  // 毫秒转秒，向上取整
+    cmd_data[5] = (duration_sec >> 8) & 0xFF;  // 持续时间高字节
+    cmd_data[6] = duration_sec & 0xFF;         // 持续时间低字节
     
-    // 通过GATT发送命令
-    int rc = ble_gattc_write_no_rsp_flat(conn_handle, cmd_handle, cmd_data, sizeof(cmd_data));
+    ESP_LOGI(TAG, "Command data prepared");
+    
+    // 使用协议帧打包函数
+    uint16_t frame_len = protocol_frame_pack(frame_buf, cmd_data, sizeof(cmd_data));
+    if (frame_len == 0) {
+        ESP_LOGE(TAG, "Failed to pack protocol frame for device ID %d", device_id);
+        return BT_MGR_ERR_INVALID_PARAM;
+    }
+    ESP_LOGI(TAG, "Protocol frame packed, length: %d", frame_len);
+    
+    ESP_LOGI(TAG, "Sending protocol frame to device ID %d: %d bytes", device_id, frame_len);
+    ESP_LOG_BUFFER_HEX(TAG, frame_buf, frame_len);
+    
+    // 通过GATT发送协议帧
+    int rc = ble_gattc_write_no_rsp_flat(conn_handle, cmd_handle, frame_buf, frame_len);
+    
     if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to send command to device ID %d: error=%d", device_id, rc);
+        ESP_LOGE(TAG, "Failed to send protocol frame to device ID %d: error=%d", device_id, rc);
         
         // 检查连接是否还有效
         if (rc == BLE_HS_ENOTCONN) {
@@ -509,7 +528,7 @@ bt_mgr_err_t bluetooth_manager_send_command(uint8_t device_id, const led_command
         return BT_MGR_ERR_CONNECT_FAILED;
     }
     
-    ESP_LOGI(TAG, "Command sent successfully to device ID %d", device_id);
+    ESP_LOGI(TAG, "Protocol frame sent successfully to device ID %d", device_id);
     return BT_MGR_OK;
 }
 
@@ -667,9 +686,9 @@ static void blecent_scan(void)
     uint8_t own_addr_type;
     struct ble_gap_disc_params disc_params;
     int rc;
-    
+
     ESP_LOGI(TAG, "[SCAN] Starting BLE device scan...");
-    
+
     // 重置扫描计数器
     g_scan_device_count = 0;
     
@@ -679,7 +698,7 @@ static void blecent_scan(void)
         ESP_LOGE(TAG, "Error determining address type: %d", rc);
         return;
     }
-    
+
     // 配置扫描参数 - 优化参数以提高发现率
     disc_params.filter_duplicates = 0;  // 不过滤重复设备，确保能发现所有广播
     disc_params.passive = 1;            // 被动扫描，不发送scan request
@@ -769,7 +788,7 @@ static void blecent_connect_if_interesting(void *disc)
     struct ble_gap_disc_desc *disc_desc = (struct ble_gap_disc_desc *)disc;
     struct ble_hs_adv_fields fields;
     int rc;
-    
+
     // 解析广播数据
     rc = ble_hs_adv_parse_fields(&fields, disc_desc->data, disc_desc->length_data);
     if (rc != 0) {
@@ -853,9 +872,11 @@ static void blecent_connect_if_interesting(void *disc)
     }
 }
 
-/* GAP事件处理函数 */
+/* GAP事件回调函数 */
 static int blecent_gap_event(struct ble_gap_event *event, void *arg)
 {
+    ESP_LOGI(TAG, "GAP event: type=%d", event->type);
+    
     switch (event->type) {
     case BLE_GAP_EVENT_DISC:
         // 设备发现事件
@@ -865,26 +886,103 @@ static int blecent_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         ESP_LOGI(TAG, "GAP Connect event, conn_handle: %d, status: %d", 
                 event->connect.conn_handle, event->connect.status);
+        ESP_LOGI(TAG, "[CONNECT_DEBUG] Event arg pointer: %p", arg);
         
         if (event->connect.status == 0) {
-            // 连接成功
+            // 连接成功事件 - 但需要验证连接是否真正可用
             led_device_t *device = (led_device_t*)arg;
+            ESP_LOGI(TAG, "[CONNECT_DEBUG] Device pointer: %p", device);
+            
+            // 验证连接是否真正建立
+            struct ble_gap_conn_desc conn_desc;
+            int conn_check = ble_gap_conn_find(event->connect.conn_handle, &conn_desc);
+            if (conn_check != 0) {
+                ESP_LOGE(TAG, "[CONNECT_VERIFY] Connection verification failed: handle %d not found", event->connect.conn_handle);
+                ESP_LOGE(TAG, "[CONNECT_VERIFY] This indicates a false connection success");
+                
+                if (device) {
+                    // 不使用互斥锁，直接设置状态
+                    device->state = LED_DEVICE_STATE_ERROR;
+                    device->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                    device->device_id = 0;  // 标记为未使用
+                }
+                g_manager_state = BT_MGR_STATE_READY;
+                return 0;
+            }
+            
+            ESP_LOGI(TAG, "[CONNECT_VERIFY] Connection verified successfully");
+            ESP_LOGI(TAG, "[CONNECT_VERIFY] Peer address: %02x:%02x:%02x:%02x:%02x:%02x, type: %d",
+                     conn_desc.peer_id_addr.val[0], conn_desc.peer_id_addr.val[1], 
+                     conn_desc.peer_id_addr.val[2], conn_desc.peer_id_addr.val[3],
+                     conn_desc.peer_id_addr.val[4], conn_desc.peer_id_addr.val[5],
+                     conn_desc.peer_id_addr.type);
+            
             if (device) {
-                xSemaphoreTake(g_devices_mutex, portMAX_DELAY);
+                ESP_LOGI(TAG, "[CONNECT_DEBUG] Device ID: %d", device->device_id);
+                
+                // 不使用互斥锁，直接设置状态
                 device->conn_handle = event->connect.conn_handle;
-                update_device_state(device, LED_DEVICE_STATE_CONNECTED);
-                xSemaphoreGive(g_devices_mutex);
+                device->state = LED_DEVICE_STATE_CONNECTING;
                 
-                ESP_LOGI(TAG, "Device ID %d connected successfully", device->device_id);
-                ESP_LOGI(TAG, "Connection established: conn_handle=%d", event->connect.conn_handle);
+                // 调用状态变化回调
+                if (g_device_state_cb) {
+                    g_device_state_cb(device->device_id, LED_DEVICE_STATE_DISCONNECTED, LED_DEVICE_STATE_CONNECTING);
+                }
                 
-                // 开始服务发现（简化版）
+                ESP_LOGI(TAG, "Device ID %d connection established, starting service discovery...", device->device_id);
+                
+                // 等待连接稳定
+                vTaskDelay(pdMS_TO_TICKS(100));
+                
+                // 再次验证连接
+                if (ble_gap_conn_find(event->connect.conn_handle, &conn_desc) != 0) {
+                    ESP_LOGE(TAG, "[CONNECT_VERIFY] Connection lost during stabilization");
+                    device->state = LED_DEVICE_STATE_ERROR;
+                    device->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                    device->device_id = 0;  // 标记为未使用
+                    g_manager_state = BT_MGR_STATE_READY;
+                    return 0;
+                }
+                
+                // 开始服务发现
                 ESP_LOGI(TAG, "Starting service discovery for device ID %d...", device->device_id);
                 int svc_rc = ble_gattc_disc_all_svcs(event->connect.conn_handle, blecent_on_gatt_disc_svc, device);
                 if (svc_rc != 0) {
                     ESP_LOGE(TAG, "Failed to start service discovery: %d", svc_rc);
+                    ESP_LOGE(TAG, "[CONNECT_DEBUG] Service discovery failed - connection may be unstable");
+                    device->state = LED_DEVICE_STATE_ERROR;
+                    device->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                    device->device_id = 0;  // 标记为未使用
+                    
+                    // 强制断开连接
+                    ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
                 } else {
                     ESP_LOGI(TAG, "Service discovery initiated successfully");
+                }
+            } else {
+                ESP_LOGE(TAG, "[CONNECT_DEBUG] Device pointer is NULL! Cannot proceed with service discovery");
+                ESP_LOGE(TAG, "[CONNECT_DEBUG] This indicates a problem with the connection setup");
+                // 尝试找到设备通过conn_handle
+                led_device_t *found_device = find_device_by_conn_handle(event->connect.conn_handle);
+                if (found_device) {
+                    ESP_LOGI(TAG, "[CONNECT_DEBUG] Found device by conn_handle: ID %d", found_device->device_id);
+                    found_device->state = LED_DEVICE_STATE_CONNECTING;
+                    
+                    // 开始服务发现
+                    ESP_LOGI(TAG, "Starting service discovery for recovered device ID %d...", found_device->device_id);
+                    int svc_rc = ble_gattc_disc_all_svcs(event->connect.conn_handle, blecent_on_gatt_disc_svc, found_device);
+                    if (svc_rc != 0) {
+                        ESP_LOGE(TAG, "Failed to start service discovery: %d", svc_rc);
+                        found_device->state = LED_DEVICE_STATE_ERROR;
+                        found_device->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                        found_device->device_id = 0;  // 标记为未使用
+                    } else {
+                        ESP_LOGI(TAG, "Service discovery initiated successfully for recovered device");
+                    }
+                } else {
+                    ESP_LOGE(TAG, "[CONNECT_DEBUG] Could not find device by conn_handle either");
+                    // 强制断开这个无效的连接
+                    ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
                 }
             }
             g_manager_state = BT_MGR_STATE_READY;
@@ -893,10 +991,14 @@ static int blecent_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGE(TAG, "Connection failed with status: %d", event->connect.status);
             led_device_t *device = (led_device_t*)arg;
             if (device) {
-                xSemaphoreTake(g_devices_mutex, portMAX_DELAY);
-                update_device_state(device, LED_DEVICE_STATE_ERROR);
-                clear_device_slot(device);
-                xSemaphoreGive(g_devices_mutex);
+                // 调用状态变化回调
+                if (g_device_state_cb) {
+                    g_device_state_cb(device->device_id, device->state, LED_DEVICE_STATE_ERROR);
+                }
+                
+                device->state = LED_DEVICE_STATE_ERROR;
+                device->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                device->device_id = 0;  // 标记为未使用
             }
             g_manager_state = BT_MGR_STATE_READY;
         }
@@ -906,14 +1008,19 @@ static int blecent_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "GAP Disconnect event, conn_handle: %d, reason: %d", 
                 event->disconnect.conn.conn_handle, event->disconnect.reason);
         
-        xSemaphoreTake(g_devices_mutex, portMAX_DELAY);
         led_device_t *device = find_device_by_conn_handle(event->disconnect.conn.conn_handle);
         if (device) {
             ESP_LOGI(TAG, "Device ID %d disconnected", device->device_id);
-            update_device_state(device, LED_DEVICE_STATE_DISCONNECTED);
-            clear_device_slot(device);
+            
+            // 调用状态变化回调
+            if (g_device_state_cb) {
+                g_device_state_cb(device->device_id, device->state, LED_DEVICE_STATE_DISCONNECTED);
+            }
+            
+            device->state = LED_DEVICE_STATE_DISCONNECTED;
+            device->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            device->device_id = 0;  // 标记为未使用
         }
-        xSemaphoreGive(g_devices_mutex);
         break;
         
     case BLE_GAP_EVENT_DISC_COMPLETE:
@@ -936,10 +1043,20 @@ static int blecent_gap_event(struct ble_gap_event *event, void *arg)
                 uint8_t data[256];
                 uint16_t len = OS_MBUF_PKTLEN(event->notify_rx.om);
                 if (len > sizeof(data)) len = sizeof(data);
-                os_mbuf_copydata(event->notify_rx.om, 0, len, data);
                 
-                g_device_response_cb(device->device_id, data, len);
+                int copy_result = os_mbuf_copydata(event->notify_rx.om, 0, len, data);
+                if (copy_result == 0) {
+                    ESP_LOGI(TAG, "✅ Notification data copied successfully: %d bytes", len);
+                    ESP_LOG_BUFFER_HEX(TAG, data, len);
+                    g_device_response_cb(device->device_id, data, len);
+                } else {
+                    ESP_LOGW(TAG, "Failed to copy notification data: %d", copy_result);
+                }
+            } else {
+                ESP_LOGW(TAG, "Device not found for conn_handle: %d", event->notify_rx.conn_handle);
             }
+        } else {
+            ESP_LOGW(TAG, "No response callback registered");
         }
         return 0;
         
@@ -951,6 +1068,98 @@ static int blecent_gap_event(struct ble_gap_event *event, void *arg)
     default:
         ESP_LOGD(TAG, "Unhandled GAP event: %d", event->type);
         break;
+    }
+    
+    return 0;
+}
+
+/* GATT特征值发现回调（简化版） */
+static int blecent_on_gatt_disc_chr(uint16_t conn_handle, const struct ble_gatt_error *error,
+                                    const struct ble_gatt_chr *chr, void *arg)
+{
+    led_device_t *device = (led_device_t*)arg;
+    
+    if (error->status != 0) {
+        ESP_LOGE(TAG, "Characteristic discovery failed: status=%d conn_handle=%d", 
+                error->status, conn_handle);
+        return 0;
+    }
+    
+    if (chr == NULL) {
+        ESP_LOGI(TAG, "Characteristic discovery complete: conn_handle=%d", conn_handle);
+        ESP_LOGI(TAG, "All characteristics discovered for device ID %d", device ? device->device_id : 0);
+        
+        // 检查是否已经发现了必要的特征值
+        if (device && device->cmd_chr_handle != 0 && device->notify_chr_handle != 0) {
+            ESP_LOGI(TAG, "[SERVICE_DISCOVERY] Device ID %d service discovery completed successfully", device->device_id);
+            ESP_LOGI(TAG, "[SERVICE_DISCOVERY] Command handle: %d, Notify handle: %d", 
+                     device->cmd_chr_handle, device->notify_chr_handle);
+            
+            // 如果设备已经连接，则不再进行后续操作
+            if (device->state == LED_DEVICE_STATE_CONNECTED) {
+                ESP_LOGI(TAG, "[SERVICE_DISCOVERY] Device ID %d already connected, skipping further operations", device->device_id);
+                return 0;
+            }
+            
+            // 标记为已连接
+            device->state = LED_DEVICE_STATE_CONNECTED;
+            ESP_LOGI(TAG, "[SERVICE_DISCOVERY] Device ID %d now marked as CONNECTED", device->device_id);
+        } else {
+            ESP_LOGI(TAG, "[SERVICE_DISCOVERY] Characteristic discovery completed but missing required characteristics");
+            ESP_LOGI(TAG, "[SERVICE_DISCOVERY] cmd_handle: %d, notify_handle: %d", 
+                     device ? device->cmd_chr_handle : -1, device ? device->notify_chr_handle : -1);
+        }
+        return 0;
+    }
+    
+    // 打印发现的特征值信息
+    char uuid_str[BLE_UUID_STR_LEN];
+    ble_uuid_to_str(&chr->uuid.u, uuid_str);
+    ESP_LOGI(TAG, "Discovered characteristic: UUID=%s, handle=%d, properties=0x%02x", 
+             uuid_str, chr->val_handle, chr->properties);
+    
+    // 只处理三个目标特征值
+    bool is_cmd_char = false;
+    bool is_notify_char = false;
+    
+    // 检查下发特征值 (0xFF01)
+    if (ble_uuid_cmp(&chr->uuid.u, BLE_UUID16_DECLARE(LED_STRIP_CMD_CHAR_UUID_16)) == 0) {
+        is_cmd_char = true;
+        ESP_LOGI(TAG, "Found command characteristic (0xFF01) for device ID %d", device ? device->device_id : 0);
+    }
+    
+    // 检查接收特征值 (0xFF02)  
+    if (ble_uuid_cmp(&chr->uuid.u, BLE_UUID16_DECLARE(LED_STRIP_NOTIFY_CHAR_UUID_16)) == 0) {
+        is_notify_char = true;
+        ESP_LOGI(TAG, "Found notify characteristic (0xFF02) for device ID %d", device ? device->device_id : 0);
+    }
+    
+    if (is_cmd_char && device) {
+        device->cmd_chr_handle = chr->val_handle;
+        ESP_LOGI(TAG, "✅ Command characteristic handle set: %d", device->cmd_chr_handle);
+    } else if (is_notify_char && device) {
+        device->notify_chr_handle = chr->val_handle;
+        ESP_LOGI(TAG, "✅ Notify characteristic handle set: %d", device->notify_chr_handle);
+        
+        // 找到通知特征值后，如果命令特征值也已找到，则标记为连接成功
+        if (device->cmd_chr_handle != 0) {
+            ESP_LOGI(TAG, "[DISCOVERY_SUCCESS] Found both characteristics! Marking device as CONNECTED");
+            
+            // 调用状态变化回调
+            if (g_device_state_cb) {
+                g_device_state_cb(device->device_id, device->state, LED_DEVICE_STATE_CONNECTED);
+            }
+            
+            device->state = LED_DEVICE_STATE_CONNECTED;
+            ESP_LOGI(TAG, "[DISCOVERY_SUCCESS] Device ID %d marked as CONNECTED", device->device_id);
+            
+            // 对于一对多场景，只停止当前连接的特征值发现
+            ESP_LOGI(TAG, "[DISCOVERY_SUCCESS] Device ID %d discovery completed successfully", device->device_id);
+            
+            return 1;  // 停止当前连接的特征值发现过程
+        }
+    } else {
+        ESP_LOGI(TAG, "Ignoring non-target characteristic: %s", uuid_str);
     }
     
     return 0;
@@ -981,21 +1190,34 @@ static int blecent_on_gatt_disc_svc(uint16_t conn_handle, const struct ble_gatt_
     ESP_LOGI(TAG, "Discovered service: UUID=%s, start_handle=%d, end_handle=%d", 
              uuid_str, service->start_handle, service->end_handle);
     
-    // 检查是否为LED控制服务
+    // 检查是否已经连接成功(避免重复发现)
+    if (device && device->state == LED_DEVICE_STATE_CONNECTED) {
+        ESP_LOGI(TAG, "Device already connected, skipping service discovery for: %s", uuid_str);
+        return 0;
+    }
+    
+    // 只处理 0x00FF 服务，完全忽略其他服务
     if (ble_uuid_cmp(&service->uuid.u, BLE_UUID16_DECLARE(LED_STRIP_SERVICE_UUID_16)) == 0) {
-        ESP_LOGI(TAG, "Found Smart Tag control service for device ID %d", device ? device->device_id : 0);
-        ESP_LOGI(TAG, "Service handle range: %d - %d", service->start_handle, service->end_handle);
+        ESP_LOGI(TAG, "✅ Found target service (0x00FF) for device ID %d", device ? device->device_id : 0);
+        ESP_LOGI(TAG, "🔍 Starting characteristic discovery for service UUID: %s", uuid_str);
+        ESP_LOGI(TAG, "Service handle range: %d - %d", 
+                service->start_handle, service->end_handle);
         
-        // 发现特征值（这里简化处理，实际应该发现具体的特征值）
-        if (device) {
-            // 假设特征值句柄（简化处理）
-            device->cmd_chr_handle = service->start_handle + 1;
-            device->notify_chr_handle = service->start_handle + 2;
-            ESP_LOGI(TAG, "Assigned characteristic handles: cmd=%d, notify=%d", 
-                     device->cmd_chr_handle, device->notify_chr_handle);
+        // 开始发现该服务的特征值
+        int chr_rc = ble_gattc_disc_all_chrs(conn_handle, service->start_handle, service->end_handle,
+                                            blecent_on_gatt_disc_chr, device);
+        if (chr_rc != 0) {
+            ESP_LOGE(TAG, "Failed to start characteristic discovery: %d", chr_rc);
+        } else {
+            ESP_LOGI(TAG, "✅ Characteristic discovery initiated successfully");
         }
+        
+        // 找到目标服务后，停止当前连接的服务发现过程，不影响其他设备
+        ESP_LOGI(TAG, "✅ Target service found for device ID %d, stopping service discovery for this connection", 
+                 device ? device->device_id : 0);
+        return 1;  // 停止当前连接的服务发现过程
     } else {
-        ESP_LOGI(TAG, "Skipping non-target service: %s", uuid_str);
+        ESP_LOGI(TAG, "Ignoring non-target service: %s", uuid_str);
     }
     
     return 0;
@@ -1051,20 +1273,6 @@ static led_device_t* allocate_device_slot(void)
         }
     }
     return NULL;
-}
-
-/* 更新设备状态 */
-static void update_device_state(led_device_t *device, led_device_state_t new_state)
-{
-    if (!device) return;
-    
-    led_device_state_t old_state = device->state;
-    device->state = new_state;
-    
-    // 调用状态变化回调
-    if (g_device_state_cb) {
-        g_device_state_cb(device->device_id, old_state, new_state);
-    }
 }
 
 /* 清空设备槽位 */
@@ -1181,4 +1389,88 @@ static void debug_parse_adv_data(const uint8_t *data, uint8_t len)
         
         pos += field_len + 1;
     }
+} 
+
+/* 协议帧打包函数（简化版） */
+uint16_t protocol_frame_pack(uint8_t *frame_buf, const uint8_t *data, uint16_t data_len)
+{
+    if (!frame_buf || data_len > 32) {
+        return 0;
+    }
+    
+    frame_buf[0] = 0xAA;                    // 帧头1
+    frame_buf[1] = 0x55;                    // 帧头2
+    
+    // 复制数据（如果有数据）
+    if (data && data_len > 0) {
+        memcpy(&frame_buf[2], data, data_len);
+    }
+    
+    frame_buf[2 + data_len] = 0x55;         // 帧尾1
+    frame_buf[3 + data_len] = 0xAA;         // 帧尾2
+    
+    return 4 + data_len;                    // 返回总帧长度
+}
+
+/* 协议帧解包函数（简化版） */
+uint16_t protocol_frame_unpack(const uint8_t *frame_buf, uint16_t frame_len, 
+                              uint8_t *data_buf, uint16_t data_buf_size)
+{
+    if (!frame_buf || !data_buf || frame_len < 4) {
+        return 0;
+    }
+    
+    // 检查帧头
+    if (frame_buf[0] != 0xAA || frame_buf[1] != 0x55) {
+        return 0;  // 帧头错误
+    }
+    
+    uint16_t data_len = frame_len - 4;  // 去除帧头和帧尾
+    
+    // 检查帧尾
+    if (frame_buf[frame_len - 2] != 0x55 || frame_buf[frame_len - 1] != 0xAA) {
+        return 0;  // 帧尾错误
+    }
+    
+    // 检查数据长度
+    if (data_len > data_buf_size) {
+        return 0;  // 缓冲区不足
+    }
+    
+    // 复制数据
+    if (data_len > 0) {
+        memcpy(data_buf, &frame_buf[2], data_len);
+    }
+    
+    return data_len;
+}
+
+/* 创建响应帧函数 */
+uint16_t create_response_frame(uint8_t cmd_type, uint16_t device_id, const uint8_t *data, 
+                              uint8_t data_len, uint8_t *frame_buf, uint16_t frame_buf_size)
+{
+    if (!frame_buf || frame_buf_size < 5) {
+        return 0;
+    }
+    
+    // 创建响应数据结构
+    strip_to_station_data_t response;
+    response.cmd_type = cmd_type;
+    response.device_id = device_id;  // 大端格式
+    
+    // 复制数据到响应结构
+    uint8_t copy_len = data_len;
+    if (copy_len > sizeof(response.data)) {
+        copy_len = sizeof(response.data);
+    }
+    
+    if (data && copy_len > 0) {
+        memcpy(response.data, data, copy_len);
+    }
+    
+    // 计算响应结构的总长度
+    uint16_t response_len = 3 + copy_len;  // cmd_type(1) + device_id(2) + data
+    
+    // 使用协议帧打包函数打包响应
+    return protocol_frame_pack(frame_buf, (uint8_t*)&response, response_len);
 } 
