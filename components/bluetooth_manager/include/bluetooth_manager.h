@@ -5,97 +5,104 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* 最大支持的灯条设备数量 */
-#define MAX_LED_DEVICES             10
-#define BLE_SCAN_DURATION_MS        10000  // 扫描持续时间10秒
-#define BLE_CONNECT_TIMEOUT_MS      5000   // 连接超时5秒
+/* 广播管理器配置 */
+#define MAX_DEVICE_GROUPS           16      // 最大分组数量
+#define BROADCAST_TIMEOUT_MS        1000    // 广播超时时间
+#define SEQUENCE_HISTORY_SIZE       32      // 序列号历史记录大小
 
 /* 蓝牙管理器错误代码 */
 typedef enum {
     BT_MGR_OK = 0,
     BT_MGR_ERR_INIT_FAILED = -1,
-    BT_MGR_ERR_SCAN_FAILED = -2,
-    BT_MGR_ERR_CONNECT_FAILED = -3,
-    BT_MGR_ERR_NOT_INITIALIZED = -4,
-    BT_MGR_ERR_DEVICE_NOT_FOUND = -5,
-    BT_MGR_ERR_DEVICE_FULL = -6,
-    BT_MGR_ERR_INVALID_PARAM = -7
+    BT_MGR_ERR_NOT_INITIALIZED = -2,
+    BT_MGR_ERR_INVALID_PARAM = -3,
+    BT_MGR_ERR_BROADCAST_FAILED = -4,
+    BT_MGR_ERR_GROUP_NOT_FOUND = -5,
+    BT_MGR_ERR_SEQUENCE_OVERFLOW = -6,
+    BT_MGR_ERR_PACKET_TOO_LARGE = -7
 } bt_mgr_err_t;
 
 /* 蓝牙管理器状态 */
 typedef enum {
     BT_MGR_STATE_UNINITIALIZED = 0,
     BT_MGR_STATE_INITIALIZED,
-    BT_MGR_STATE_SCANNING,
-    BT_MGR_STATE_CONNECTING,
-    BT_MGR_STATE_READY
+    BT_MGR_STATE_READY,
+    BT_MGR_STATE_BROADCASTING,
+    BT_MGR_STATE_ERROR
 } bt_mgr_state_t;
 
-/* 灯条设备连接状态 */
-typedef enum {
-    LED_DEVICE_STATE_DISCONNECTED = 0,
-    LED_DEVICE_STATE_CONNECTING,
-    LED_DEVICE_STATE_CONNECTED,
-    LED_DEVICE_STATE_ERROR
-} led_device_state_t;
-
-/* 灯条设备信息结构 */
+/* 广播命令结构 */
 typedef struct {
-    uint8_t device_id;                  // 设备ID (1-10)
-    uint8_t mac_addr[6];               // MAC地址
-    uint8_t addr_type;                 // 地址类型 (0=公共地址, 1=随机地址)
-    char name[32];                     // 设备名称
-    uint16_t conn_handle;              // 连接句柄
-    led_device_state_t state;          // 连接状态
-    int8_t rssi;                       // 信号强度
-    uint32_t last_seen;                // 最后见到时间(ms)
-    uint32_t last_response;            // 最后响应时间(ms)
+    uint8_t cmd_type;               // 命令类型 (BROADCAST_CMD_xxx)
+    uint8_t group_id;               // 目标分组 (GROUP_xxx)
+    uint8_t priority;               // 优先级 (PRIORITY_xxx)
     
-    // GATT特征值句柄
-    uint16_t cmd_chr_handle;           // 命令特征值句柄
-    uint16_t notify_chr_handle;        // 通知特征值句柄
-    uint16_t notify_desc_handle;       // 通知描述符句柄
-    
-    // 设备状态
-    led_color_t current_color;         // 当前颜色
-    bool is_on;                        // 是否开启
-    uint8_t battery_level;             // 电池电量
-} led_device_t;
+    // 命令参数
+    union {
+        struct {
+            uint8_t color;          // LED颜色
+            uint8_t blink_mode;     // 闪烁模式
+            uint8_t beep_mode;      // 蜂鸣器模式
+            uint32_t duration_ms;   // 持续时间
+        } led_params;
+        
+        struct {
+            uint32_t tag_ids[4];    // 特定标签ID
+            uint8_t count;          // 标签数量
+        } target_params;
+        
+        struct {
+            uint8_t battery_level;  // 电池电量百分比
+            uint16_t voltage_mv;    // 电池电压(毫伏)
+            uint8_t warning_type;   // 预警类型
+        } battery_warning;
+        
+        struct {
+            uint32_t scan_id;       // 盘点ID
+            uint8_t scan_type;      // 盘点类型
+            uint32_t timeout_ms;    // 响应超时时间
+        } inventory_params;
+        
+        struct {
+            uint8_t check_items;    // 检查项目位掩码
+            uint32_t check_id;      // 检查ID
+        } health_check_params;
+        
+        uint8_t raw_data[16];       // 原始数据
+    } params;
+} broadcast_command_t;
 
-/* 设备扫描结果结构 */
-typedef struct {
-    uint8_t mac_addr[6];
-    uint8_t addr_type;                 // 地址类型 (0=公共地址, 1=随机地址)
-    char name[32];
-    int8_t rssi;
-    bool is_led_device;                // 是否为灯条设备
-} scan_result_t;
+/* 广播响应回调函数类型 */
+typedef void (*broadcast_sent_cb_t)(bt_mgr_err_t result, uint16_t sequence);
 
-/* 设备发现回调函数类型 */
-typedef void (*device_found_cb_t)(const scan_result_t *result);
+/* 设备反馈回调函数类型 (如果设备通过其他方式反馈) */
+typedef void (*device_feedback_cb_t)(uint32_t tag_id, uint8_t response_type, const uint8_t *data, uint8_t length);
 
-/* 设备状态变化回调函数类型 */
-typedef void (*device_state_cb_t)(uint8_t device_id, led_device_state_t old_state, led_device_state_t new_state);
+/* 盘点结果回调函数类型 */
+typedef void (*inventory_result_cb_t)(uint32_t scan_id, const inventory_info_t *info);
 
-/* 设备响应回调函数类型 */
-typedef void (*device_response_cb_t)(uint8_t device_id, const uint8_t *data, uint16_t length);
+/* 健康检查结果回调函数类型 */
+typedef void (*health_check_result_cb_t)(uint32_t check_id, uint32_t tag_id, uint8_t check_result, uint8_t fault_flags);
 
-/* 基站蓝牙管理器API */
+/* 故障报告回调函数类型 */
+typedef void (*fault_report_cb_t)(uint32_t tag_id, uint8_t fault_type, uint8_t fault_code, const uint8_t *fault_data);
+
+/* =================== 基站蓝牙管理器API =================== */
 
 /**
- * @brief 初始化蓝牙管理器(Central模式)
+ * @brief 初始化广播蓝牙管理器
  * @return 错误代码
  */
 bt_mgr_err_t bluetooth_manager_init(void);
 
 /**
- * @brief 启动基站服务(开始扫描设备)
+ * @brief 启动广播服务
  * @return 错误代码
  */
 bt_mgr_err_t bluetooth_manager_start(void);
 
 /**
- * @brief 停止基站服务
+ * @brief 停止广播服务
  * @return 错误代码
  */
 bt_mgr_err_t bluetooth_manager_stop(void);
@@ -106,187 +113,221 @@ bt_mgr_err_t bluetooth_manager_stop(void);
  */
 bt_mgr_state_t bluetooth_manager_get_state(void);
 
+/* =================== 广播控制接口 =================== */
+
 /**
- * @brief 开始扫描灯条设备
- * @param duration_ms 扫描持续时间(毫秒)，0表示持续扫描
- * @param found_cb 设备发现回调函数
+ * @brief 发送广播命令
+ * @param cmd 广播命令结构
+ * @param sent_cb 发送完成回调 (可选)
  * @return 错误代码
  */
-bt_mgr_err_t bluetooth_manager_start_scan(uint32_t duration_ms, device_found_cb_t found_cb);
+bt_mgr_err_t bluetooth_manager_broadcast_command(const broadcast_command_t *cmd, broadcast_sent_cb_t sent_cb);
 
 /**
- * @brief 停止扫描
- * @return 错误代码
- */
-bt_mgr_err_t bluetooth_manager_stop_scan(void);
-
-/**
- * @brief 连接灯条设备
- * @param mac_addr 设备MAC地址
- * @param device_id 分配的设备ID (1-10)
- * @return 错误代码
- */
-bt_mgr_err_t bluetooth_manager_connect_device(const uint8_t *mac_addr, uint8_t device_id);
-
-/**
- * @brief 连接灯条设备（指定地址类型）
- * @param mac_addr 设备MAC地址
- * @param device_id 分配的设备ID (1-10)
- * @param addr_type 地址类型 (0=公共地址, 1=随机地址)
- * @return 错误代码
- */
-bt_mgr_err_t bluetooth_manager_connect_device_with_type(const uint8_t *mac_addr, uint8_t device_id, uint8_t addr_type);
-
-/**
- * @brief 断开灯条设备
- * @param device_id 设备ID
- * @return 错误代码
- */
-bt_mgr_err_t bluetooth_manager_disconnect_device(uint8_t device_id);
-
-/**
- * @brief 发送命令到指定灯条
- * @param device_id 设备ID
- * @param cmd 命令结构
- * @return 错误代码
- */
-bt_mgr_err_t bluetooth_manager_send_command(uint8_t device_id, const led_command_t *cmd);
-
-/**
- * @brief 广播命令到所有已连接灯条
- * @param cmd 命令结构
- * @return 成功发送的设备数量
- */
-int bluetooth_manager_broadcast_command(const led_command_t *cmd);
-
-/**
- * @brief 获取设备信息
- * @param device_id 设备ID
- * @return 设备信息指针，失败返回NULL
- */
-const led_device_t* bluetooth_manager_get_device(uint8_t device_id);
-
-/**
- * @brief 获取所有已连接设备列表
- * @param devices 设备数组缓冲区
- * @param max_count 最大设备数量
- * @return 实际连接的设备数量
- */
-int bluetooth_manager_get_connected_devices(led_device_t *devices, int max_count);
-
-/**
- * @brief 获取已连接设备数量
- * @return 连接设备数量
- */
-int bluetooth_manager_get_connected_count(void);
-
-/**
- * @brief 设置设备状态变化回调
- * @param cb 回调函数
- */
-void bluetooth_manager_set_state_callback(device_state_cb_t cb);
-
-/**
- * @brief 设置设备响应回调
- * @param cb 回调函数
- */
-void bluetooth_manager_set_response_callback(device_response_cb_t cb);
-
-/**
- * @brief 检查设备是否在线
- * @param device_id 设备ID
- * @return true=在线，false=离线
- */
-bool bluetooth_manager_is_device_online(uint8_t device_id);
-
-/**
- * @brief 获取设备信号强度
- * @param device_id 设备ID
- * @return RSSI值(dBm)，错误返回-128
- */
-int8_t bluetooth_manager_get_device_rssi(uint8_t device_id);
-
-/* ========== 仓库管理系统扩展API ========== */
-
-/**
- * @brief 激活指定编号的标签(LED+蜂鸣器)
- * @param warehouse_id 仓库位置编号 (对应device_id)
+ * @brief 广播到所有设备 - 设置LED颜色
  * @param color LED颜色
- * @param duration_ms 激活持续时间(毫秒)
- * @param enable_beep 是否启用蜂鸣器
+ * @param blink_mode 闪烁模式
+ * @param duration_ms 持续时间(0=永久)
  * @return 错误代码
  */
-bt_mgr_err_t bluetooth_manager_activate_tag(uint8_t warehouse_id, led_color_t color, 
-                                           uint32_t duration_ms, bool enable_beep);
+bt_mgr_err_t bluetooth_manager_broadcast_all_set_color(uint8_t color, uint8_t blink_mode, uint32_t duration_ms);
 
 /**
- * @brief 停止指定标签的激活状态
- * @param warehouse_id 仓库位置编号
- * @return 错误代码
- */
-bt_mgr_err_t bluetooth_manager_deactivate_tag(uint8_t warehouse_id);
-
-/**
- * @brief 批量激活多个标签(用于盘点)
- * @param warehouse_ids 仓库位置编号数组
- * @param count 数组长度
+ * @brief 广播到指定分组 - 设置LED颜色
+ * @param group_id 分组ID
  * @param color LED颜色
- * @param enable_beep 是否启用蜂鸣器
- * @return 成功激活的标签数量
- */
-int bluetooth_manager_activate_multiple_tags(const uint8_t *warehouse_ids, int count, 
-                                            led_color_t color, bool enable_beep);
-
-/**
- * @brief 设置标签蜂鸣器状态
- * @param warehouse_id 仓库位置编号
- * @param enable 是否启用蜂鸣器
+ * @param blink_mode 闪烁模式
+ * @param duration_ms 持续时间(0=永久)
  * @return 错误代码
  */
-bt_mgr_err_t bluetooth_manager_set_beep_state(uint8_t warehouse_id, bool enable);
+bt_mgr_err_t bluetooth_manager_broadcast_group_set_color(uint8_t group_id, uint8_t color, uint8_t blink_mode, uint32_t duration_ms);
 
 /**
- * @brief 获取标签电池状态
- * @param warehouse_id 仓库位置编号
- * @return 电池电量等级 (0-4)，错误返回-1
+ * @brief 广播电池低电预警
+ * @param battery_level 电池电量百分比
+ * @param voltage_mv 电池电压(毫伏)
+ * @param warning_type 预警类型
+ * @return 错误代码
  */
-int bluetooth_manager_get_battery_level(uint8_t warehouse_id);
+bt_mgr_err_t bluetooth_manager_broadcast_battery_warning(uint8_t battery_level, uint16_t voltage_mv, uint8_t warning_type);
 
 /**
- * @brief 执行仓库盘点 - 获取所有标签状态
- * @param inventory_report 盘点报告缓冲区
- * @param max_tags 最大标签数量
- * @return 实际盘点的标签数量
+ * @brief 发起盘点扫描
+ * @param scan_id 盘点ID
+ * @param scan_type 盘点类型 (0=全部, 1=分组, 2=指定)
+ * @param group_id 分组ID (scan_type=1时有效)
+ * @param timeout_ms 响应超时时间
+ * @return 错误代码
  */
-int bluetooth_manager_inventory_check(led_device_t *inventory_report, int max_tags);
+bt_mgr_err_t bluetooth_manager_start_inventory_scan(uint32_t scan_id, uint8_t scan_type, uint8_t group_id, uint32_t timeout_ms);
 
 /**
- * @brief 检查低电量标签
- * @param low_battery_tags 低电量标签ID数组
- * @param max_count 最大数组长度
- * @return 低电量标签数量
+ * @brief 发起健康检查
+ * @param check_items 检查项目位掩码
+ * @param check_id 检查ID
+ * @param group_id 分组ID
+ * @return 错误代码
  */
-int bluetooth_manager_check_low_battery_tags(uint8_t *low_battery_tags, int max_count);
+bt_mgr_err_t bluetooth_manager_start_health_check(uint8_t check_items, uint32_t check_id, uint8_t group_id);
 
 /**
- * @brief 广播紧急信号到所有标签(红灯+蜂鸣)
- * @return 成功激活的标签数量
+ * @brief 广播关闭所有设备
+ * @return 错误代码
  */
-int bluetooth_manager_emergency_alert(void);
-
-/* 仓库管理特定回调函数类型 */
+bt_mgr_err_t bluetooth_manager_broadcast_all_off(void);
 
 /**
- * @brief 电池电量警报回调
- * @param warehouse_id 仓库位置编号
- * @param battery_level 电池电量等级
+ * @brief 广播蜂鸣器控制
+ * @param group_id 分组ID (GROUP_ALL表示所有设备)
+ * @param beep_mode 蜂鸣器模式
+ * @return 错误代码
  */
-typedef void (*battery_alert_cb_t)(uint8_t warehouse_id, uint8_t battery_level);
+bt_mgr_err_t bluetooth_manager_broadcast_beep(uint8_t group_id, uint8_t beep_mode);
+
+/* =================== 分组管理接口 =================== */
 
 /**
- * @brief 设置电池电量警报回调
+ * @brief 注册设备分组
+ * @param group_id 分组ID
+ * @param group_name 分组名称
+ * @param estimated_count 预估设备数量
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_register_group(uint8_t group_id, const char *group_name, uint32_t estimated_count);
+
+/**
+ * @brief 获取分组信息
+ * @param group_id 分组ID
+ * @return 分组信息指针，失败返回NULL
+ */
+const device_group_t* bluetooth_manager_get_group(uint8_t group_id);
+
+/**
+ * @brief 获取所有分组列表
+ * @param groups 分组数组缓冲区
+ * @param max_count 最大分组数量
+ * @return 实际分组数量
+ */
+int bluetooth_manager_get_all_groups(device_group_t *groups, int max_count);
+
+/**
+ * @brief 激活分组
+ * @param group_id 分组ID
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_activate_group(uint8_t group_id);
+
+/**
+ * @brief 停用分组
+ * @param group_id 分组ID
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_deactivate_group(uint8_t group_id);
+
+/* =================== 高级控制接口 =================== */
+
+/**
+ * @brief 批量激活标签 (快递驿站取件场景)
+ * @param package_ids 包裹位置ID数组
+ * @param count 数量
+ * @param color 激活颜色
+ * @param enable_beep 是否启用蜂鸣器
+ * @return 成功处理的数量
+ */
+int bluetooth_manager_activate_multiple_tags(const uint32_t *package_ids, int count, uint8_t color, bool enable_beep);
+
+/**
+ * @brief 快递驿站模式 (所有设备蓝色常亮)
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_express_station_mode(void);
+
+/**
+ * @brief 包裹取件提醒 (指定区域设备闪烁提醒)
+ * @param group_id 区域分组ID
+ * @param alert_color 提醒颜色
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_package_pickup_alert(uint8_t group_id, uint8_t alert_color);
+
+/**
+ * @brief 夜间模式广播 (所有设备低亮度)
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_night_mode(void);
+
+/* =================== 配置和统计接口 =================== */
+
+/**
+ * @brief 设置广播间隔
+ * @param interval_ms 广播间隔(毫秒)
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_set_broadcast_interval(uint32_t interval_ms);
+
+/**
+ * @brief 设置广播重复次数
+ * @param repeat_count 重复次数
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_set_repeat_count(uint8_t repeat_count);
+
+/**
+ * @brief 获取广播统计信息
+ * @return 统计信息指针
+ */
+const broadcast_stats_t* bluetooth_manager_get_stats(void);
+
+/**
+ * @brief 重置广播统计
+ * @return 错误代码
+ */
+bt_mgr_err_t bluetooth_manager_reset_stats(void);
+
+/**
+ * @brief 设置广播完成回调
  * @param cb 回调函数
  */
-void bluetooth_manager_set_battery_alert_callback(battery_alert_cb_t cb);
+void bluetooth_manager_set_broadcast_callback(broadcast_sent_cb_t cb);
+
+/**
+ * @brief 设置设备反馈回调 (如果设备有反馈机制)
+ * @param cb 回调函数
+ */
+void bluetooth_manager_set_feedback_callback(device_feedback_cb_t cb);
+
+/**
+ * @brief 设置盘点结果回调
+ * @param cb 回调函数
+ */
+void bluetooth_manager_set_inventory_callback(inventory_result_cb_t cb);
+
+/**
+ * @brief 设置健康检查结果回调
+ * @param cb 回调函数
+ */
+void bluetooth_manager_set_health_check_callback(health_check_result_cb_t cb);
+
+/**
+ * @brief 设置故障报告回调
+ * @param cb 回调函数
+ */
+void bluetooth_manager_set_fault_report_callback(fault_report_cb_t cb);
+
+/* =================== 便利宏定义 =================== */
+
+/* 快速颜色控制宏 */
+#define BT_BROADCAST_RED_ALL()           bluetooth_manager_broadcast_all_set_color(LED_COLOR_RED, BLINK_MODE_NONE, 0)
+#define BT_BROADCAST_GREEN_ALL()         bluetooth_manager_broadcast_all_set_color(LED_COLOR_GREEN, BLINK_MODE_NONE, 0)
+#define BT_BROADCAST_BLUE_ALL()          bluetooth_manager_broadcast_all_set_color(LED_COLOR_BLUE, BLINK_MODE_NONE, 0)
+#define BT_BROADCAST_OFF_ALL()           bluetooth_manager_broadcast_all_off()
+
+/* 快速闪烁控制宏 */
+#define BT_BROADCAST_BLINK_RED_ALL()     bluetooth_manager_broadcast_all_set_color(LED_COLOR_RED, BLINK_MODE_FAST, 0)
+#define BT_BROADCAST_BLINK_YELLOW_ALL()  bluetooth_manager_broadcast_all_set_color(LED_COLOR_YELLOW, BLINK_MODE_SLOW, 0)
+
+/* 快速分组控制宏 */
+#define BT_BROADCAST_GROUP_RED(group)    bluetooth_manager_broadcast_group_set_color(group, LED_COLOR_RED, BLINK_MODE_NONE, 0)
+#define BT_BROADCAST_GROUP_GREEN(group)  bluetooth_manager_broadcast_group_set_color(group, LED_COLOR_GREEN, BLINK_MODE_NONE, 0)
 
 #endif // BLUETOOTH_MANAGER_H 

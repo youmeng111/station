@@ -1,6 +1,7 @@
 /*
- * ESP32智能基站主程序
- * 基于ESP-IDF官方NimBLE模板重构
+ * ESP32快递驿站智能标签基站主程序 - BLE广播控制版本
+ * 支持大规模设备控制（5000台+）
+ * 应用场景：快递驿站包裹管理系统
  */
 
 #include <stdio.h>
@@ -19,270 +20,301 @@
 #include "mqtt_manager.h"
 #include "ota_manager.h"
 
-static const char *TAG = "MAIN";
+static const char *TAG = "EXPRESS_STATION";
 
-/* 静态变量用于跟踪连接重试 */
-static uint32_t g_last_connection_attempt = 0;
-static uint8_t g_last_attempted_mac[6] = {0};
-static const uint32_t CONNECTION_RETRY_INTERVAL_MS = 10000; // 10秒重试间隔
+/* 广播控制演示任务 */
+static void broadcast_demo_task(void *param);
+static void status_monitor_task(void *param);
 
-/* 设备发现回调函数 */
-static void on_device_found(const scan_result_t *result) {
-    ESP_LOGI(TAG, "[SCAN] ===== BLE SCAN RESULT =====");
-    ESP_LOGI(TAG, "  [DEV] Device Name: %s", result->name);
-    ESP_LOGI(TAG, "  [MAC] MAC Address: %02x:%02x:%02x:%02x:%02x:%02x", 
-             result->mac_addr[0], result->mac_addr[1], result->mac_addr[2],
-             result->mac_addr[3], result->mac_addr[4], result->mac_addr[5]);
-    ESP_LOGI(TAG, "  [RSSI] Signal: %d dBm", result->rssi);
-    ESP_LOGI(TAG, "  [TYPE] Is Smart Tag: %s", result->is_led_device ? "YES ^_^" : "NO -_-");
-    
-    // 如果是目标LED设备，可以尝试自动连接（测试用）
-    if (result->is_led_device && strlen(result->name) > 0) {
-        // 检查重试间隔，避免过于频繁的连接尝试
-        uint32_t current_time = esp_timer_get_time() / 1000; // 转换为毫秒
-        
-        // 如果是同一设备且在重试间隔内，跳过此次连接
-        if (memcmp(g_last_attempted_mac, result->mac_addr, 6) == 0 &&
-            (current_time - g_last_connection_attempt) < CONNECTION_RETRY_INTERVAL_MS) {
-            
-            uint32_t remaining_time = CONNECTION_RETRY_INTERVAL_MS - (current_time - g_last_connection_attempt);
-            ESP_LOGI(TAG, "[SKIP] Skipping connection attempt, retry in %lu ms", remaining_time);
-            return;
-        }
-        
-        ESP_LOGI(TAG, "[CONN] Found target Smart Tag! Attempting connection... (>_<)");
-        
-        // 记录连接尝试
-        g_last_connection_attempt = current_time;
-        memcpy(g_last_attempted_mac, result->mac_addr, 6);
-        
-        // 添加小延迟避免连接冲突
-        vTaskDelay(pdMS_TO_TICKS(100));
-        
-        // 尝试连接到设备ID 1，使用正确的地址类型
-        bt_mgr_err_t connect_result = bluetooth_manager_connect_device_with_type(
-            result->mac_addr, 1, result->addr_type);
-        if (connect_result == BT_MGR_OK) {
-            ESP_LOGI(TAG, "[OK] Connection request sent successfully ^_^");
-        } else {
-            ESP_LOGW(TAG, "[ERR] Failed to send connection request: %d (x_x)", connect_result);
-            ESP_LOGI(TAG, "[RETRY] Will retry after %lu seconds...", CONNECTION_RETRY_INTERVAL_MS/1000);
-        }
+/* 广播发送完成回调函数 */
+static void on_broadcast_sent(bt_mgr_err_t result, uint16_t sequence) {
+    if (result == BT_MGR_OK) {
+        ESP_LOGI(TAG, "[BROADCAST_OK] Command sequence %d sent successfully! (^_^)", sequence);
+    } else {
+        ESP_LOGW(TAG, "[BROADCAST_ERR] Command sequence %d failed: %d (x_x)", sequence, result);
     }
 }
 
-/* 设备状态变化回调函数 */
-static void on_device_state_changed(uint8_t device_id, led_device_state_t old_state, led_device_state_t new_state) {
-    const char* state_names[] = {"DISCONNECTED", "CONNECTING", "CONNECTED", "ERROR"};
-    
-    ESP_LOGI(TAG, "[STATE] Device ID %d: %s -> %s (@_@)", 
-             device_id, state_names[old_state], state_names[new_state]);
-    
-    switch (new_state) {
-        case LED_DEVICE_STATE_CONNECTING:
-            ESP_LOGI(TAG, "[CONN] Device ID %d: Connection in progress... (~_~)", device_id);
-            break;
-            
-        case LED_DEVICE_STATE_CONNECTED:
-            ESP_LOGI(TAG, "[OK] Device ID %d: Successfully connected! \\(^o^)/", device_id);
-            ESP_LOGI(TAG, "[READY] Ready to send commands to this device (^_^)");
-            
-            // 发送测试命令 - 设置为绿色3秒
-            led_command_t test_cmd = {
-                .type = CMD_LED_COLOR_WITH_TIME,  // 使用system_config.h中定义的命令类型
-                .led_id = device_id,
-                .param1 = LED_COLOR_GREEN, // 绿色
-                .param2 = 3000, // 3秒 (低16位)
-                .param3 = 0     // 3秒 (高16位)
-            };
-            
-            ESP_LOGI(TAG, "[GREEN] Sending test command: GREEN light for 3 seconds (^_^)");
-            bt_mgr_err_t cmd_result = bluetooth_manager_send_command(device_id, &test_cmd);
-            if (cmd_result == BT_MGR_OK) {
-                ESP_LOGI(TAG, "[SEND] Test command sent successfully (>.<)");
-            } else {
-                ESP_LOGW(TAG, "[ERR] Failed to send test command: %d (x_x)", cmd_result);
-            }
-            break;
-            
-        case LED_DEVICE_STATE_DISCONNECTED:
-            ESP_LOGI(TAG, "[DISC] Device ID %d: Disconnected (-_-)", device_id);
-            break;
-            
-        case LED_DEVICE_STATE_ERROR:
-            ESP_LOGW(TAG, "[WARN] Device ID %d: Connection error (!_!)", device_id);
-            break;
-    }
-}
-
-/* 设备响应回调函数 */
-static void on_device_response(uint8_t device_id, const uint8_t *data, uint16_t length) {
-    ESP_LOGI(TAG, "[RECV] Received response from device ID %d (<_<)", device_id);
-    ESP_LOGI(TAG, "[DATA] Length: %d bytes", length);
-    
+/* 设备反馈回调函数 (预留，如果后续设备支持反馈) */
+static void on_device_feedback(uint32_t tag_id, uint8_t response_type, const uint8_t *data, uint8_t length) {
+    ESP_LOGI(TAG, "[FEEDBACK] Received feedback from tag %lu", tag_id);
+    ESP_LOGI(TAG, "[FEEDBACK] Type: %d, Length: %d", response_type, length);
     if (length > 0) {
-        ESP_LOGI(TAG, "[RAW] Raw data:");
         ESP_LOG_BUFFER_HEX(TAG, data, length);
-        
-        // 简单的协议解析（假设第一个字节是状态码）
-        if (length >= 1) {
-            switch (data[0]) {
-                case 0x00:
-                    ESP_LOGI(TAG, "[OK] Device response: SUCCESS (^_^)");
-                    break;
-                case 0x01:
-                    ESP_LOGI(TAG, "[ERR] Device response: ERROR (x_x)");
-                    break;
-                case 0xAA:
-                    ESP_LOGI(TAG, "[ACK] Device response: ACK/PING (^o^)");
-                    break;
-                default:
-                    ESP_LOGI(TAG, "[STATUS] Device response: Status 0x%02X (o_o)", data[0]);
-                    break;
-            }
-        }
     }
 }
 
-/* 状态监控任务 */
-static void status_monitor_task(void *param) {
-    ESP_LOGI(TAG, "[INIT] Status monitor task started \\(^o^)/");
-    ESP_LOGI(TAG, "[BLE] BLE scan will start in 5 seconds... (~_~)");
+/* 广播控制演示任务 */
+static void broadcast_demo_task(void *param) {
+    ESP_LOGI(TAG, "[DEMO] Starting broadcast demo task (>_<)");
     
-    // 等待5秒让系统完全稳定，然后开始第一次扫描
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    // 等待蓝牙管理器准备就绪
+    while (bluetooth_manager_get_state() != BT_MGR_STATE_READY) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
     
-    uint32_t scan_counter = 10; // 立即触发第一次扫描
-    const uint32_t scan_interval_cycles = BLE_SCAN_INTERVAL_MS / 10000; // 扫描间隔周期数
+    ESP_LOGI(TAG, "[DEMO] Bluetooth manager ready, starting demo sequence...");
+    
+    uint32_t demo_step = 0;
     
     while (1) {
-        /* 每10秒检查一次系统状态 */
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        demo_step++;
+        ESP_LOGI(TAG, "\n===== BROADCAST DEMO STEP %lu =====", demo_step);
         
-        /* 更新系统运行时间 */
-        g_system_status.uptime_seconds += 10;
-        g_system_status.free_heap = esp_get_free_heap_size();
-        
-        /* 安全地获取蓝牙状态 */
-        int connected_count = 0;
-        bt_mgr_state_t bt_state = BT_MGR_STATE_UNINITIALIZED;
-        
-        // 添加错误检查，防止蓝牙模块未初始化时的函数调用
-        if (g_system_status.bt_connected) {
-            connected_count = bluetooth_manager_get_connected_count();
-            bt_state = bluetooth_manager_get_state();
+        switch (demo_step % 8) {
+            case 1:
+                // 演示1：全部设备亮绿灯
+                ESP_LOGI(TAG, "[DEMO1] Broadcasting GREEN to ALL devices");
+                bluetooth_manager_broadcast_all_set_color(LED_COLOR_GREEN, BLINK_MODE_NONE, 5000);
+                break;
+                
+            case 2:
+                // 演示2：货架A区域设备亮红灯闪烁（过期包裹）
+                ESP_LOGI(TAG, "[DEMO2] Broadcasting RED BLINK to Shelf A (expired packages)");
+                bluetooth_manager_broadcast_group_set_color(GROUP_SHELF_A, LED_COLOR_RED, BLINK_MODE_FAST, 3000);
+                break;
+                
+            case 3:
+                // 演示3：取件台设备亮蓝灯（待取件）
+                ESP_LOGI(TAG, "[DEMO3] Broadcasting BLUE to Counter Area (pending pickup)");
+                bluetooth_manager_broadcast_group_set_color(GROUP_COUNTER, LED_COLOR_BLUE, BLINK_MODE_SLOW, 4000);
+                break;
+                
+            case 4:
+                // 演示4：全部设备蜂鸣器单响
+                ESP_LOGI(TAG, "[DEMO4] Broadcasting BEEP to ALL devices");
+                bluetooth_manager_broadcast_beep(GROUP_ALL, BEEP_MODE_SINGLE);
+                break;
+                
+            case 5:
+                // 演示5：批量激活特定标签（模拟包裹取件）
+                ESP_LOGI(TAG, "[DEMO5] Activating multiple tags (package pickup simulation)");
+                uint32_t package_ids[] = {1001, 1002, 1003, 1004};
+                bluetooth_manager_activate_multiple_tags(package_ids, 4, LED_COLOR_YELLOW, true);
+                break;
+                
+            case 6:
+                // 演示6：电池预警广播
+                ESP_LOGI(TAG, "[DEMO6] BATTERY WARNING simulation");
+                bluetooth_manager_broadcast_battery_warning(15, 2700, 1); // 15%电量，2.7V，预警类型1
+                break;
+                
+            case 7:
+                // 演示7：包裹取件提醒（特殊包裹区域）
+                ESP_LOGI(TAG, "[DEMO7] Package pickup alert for Special Area");
+                bluetooth_manager_package_pickup_alert(GROUP_SPECIAL, LED_COLOR_PURPLE);
+                
+                // 额外演示：盘点和健康检查
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                ESP_LOGI(TAG, "[DEMO7+] Starting inventory scan");
+                bluetooth_manager_start_inventory_scan(12345, 0, GROUP_ALL, 10000); // 全量盘点
+                
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                ESP_LOGI(TAG, "[DEMO7+] Starting health check");
+                bluetooth_manager_start_health_check(HEALTH_CHECK_ALL, 54321, GROUP_ALL);
+                break;
+                
+            case 0:
+                // 演示8：快递驿站模式
+                ESP_LOGI(TAG, "[DEMO8] Express station mode activation");
+                bluetooth_manager_express_station_mode();
+                
+                // 5秒后关闭所有设备
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                ESP_LOGI(TAG, "[DEMO8] Turning off all devices");
+                bluetooth_manager_broadcast_all_off();
+                break;
         }
         
-        ESP_LOGI(TAG, "System status - BT state: %d, Connected devices: %d, Free heap: %lu", 
-                bt_state, connected_count, g_system_status.free_heap);
+        // 显示广播统计
+        const broadcast_stats_t *stats = bluetooth_manager_get_stats();
+        ESP_LOGI(TAG, "[STATS] Total: %lu, Success: %lu, Failed: %lu", 
+                 stats->total_broadcasts, stats->successful_broadcasts, stats->failed_broadcasts);
         
-        /* 定期扫描设备，但不要太频繁 */
-        scan_counter++;
-        if (connected_count == 0 && 
-            bt_state == BT_MGR_STATE_READY && 
-            scan_counter >= scan_interval_cycles) {
-            
-            ESP_LOGI(TAG, "[SCAN] Starting BLE device scan for %d seconds... (>_<)", BLE_SCAN_DURATION_MS/1000);
-            ESP_LOGI(TAG, "[SEARCH] Looking for Smart Tags and other BLE devices...");
-            
-            bt_mgr_err_t scan_result = bluetooth_manager_start_scan(BLE_SCAN_DURATION_MS, on_device_found);
-            if (scan_result == BT_MGR_OK) {
-                ESP_LOGI(TAG, "[OK] BLE scan started successfully (^_^)");
-            } else {
-                ESP_LOGW(TAG, "[ERR] Failed to start BLE scan: %d (x_x)", scan_result);
-            }
-            scan_counter = 0; // 重置计数器
-        } else if (scan_counter < scan_interval_cycles) {
-            // 显示倒计时（仅在没有连接设备时）
-            if (connected_count == 0 && bt_state == BT_MGR_STATE_READY) {
-                uint32_t seconds_to_scan = (scan_interval_cycles - scan_counter) * 10;
-                ESP_LOGI(TAG, "[TIME] Next BLE scan in %lu seconds... (T_T)", seconds_to_scan);
-            }
-        }
-        
-        /* 发送状态到MQTT（如果连接） */
-        if (g_system_status.mqtt_connected && (g_system_status.uptime_seconds % 60 == 0)) {
-            mqtt_send_status();
-}
+        // 等待下一个演示步骤
+        vTaskDelay(pdMS_TO_TICKS(8000)); // 8秒间隔
     }
+}
+
+/* 系统状态监控任务 */
+static void status_monitor_task(void *param) {
+    ESP_LOGI(TAG, "[MONITOR] Starting system status monitor (^_^)");
+    
+    while (1) {
+        // 获取系统状态
+        ESP_LOGI(TAG, "\n===== SYSTEM STATUS =====");
+        ESP_LOGI(TAG, "[SYS] Free heap: %lu bytes", esp_get_free_heap_size());
+        ESP_LOGI(TAG, "[SYS] Uptime: %llu seconds", esp_timer_get_time() / 1000000);
+        
+        // 获取蓝牙管理器状态
+        bt_mgr_state_t bt_state = bluetooth_manager_get_state();
+        const char* state_names[] = {"UNINITIALIZED", "INITIALIZED", "READY", "BROADCASTING", "ERROR"};
+        ESP_LOGI(TAG, "[BT] Manager state: %s", state_names[bt_state]);
+        
+        // 获取广播统计
+        const broadcast_stats_t *stats = bluetooth_manager_get_stats();
+        ESP_LOGI(TAG, "[BT] Broadcast stats:");
+        ESP_LOGI(TAG, "[BT]   Total: %lu", stats->total_broadcasts);
+        ESP_LOGI(TAG, "[BT]   Success: %lu", stats->successful_broadcasts);
+        ESP_LOGI(TAG, "[BT]   Failed: %lu", stats->failed_broadcasts);
+        ESP_LOGI(TAG, "[BT]   Current Sequence: %d", stats->current_sequence);
+        ESP_LOGI(TAG, "[BT]   Last Broadcast: %lld ms ago", 
+                (esp_timer_get_time() / 1000) - stats->last_broadcast_time);
+        
+        // 获取设备分组信息
+        device_group_t groups[MAX_DEVICE_GROUPS];
+        int group_count = bluetooth_manager_get_all_groups(groups, MAX_DEVICE_GROUPS);
+        ESP_LOGI(TAG, "[GROUPS] Active groups: %d", group_count);
+        for (int i = 0; i < group_count && i < 5; i++) { // 只显示前5个分组
+            ESP_LOGI(TAG, "[GROUPS]   %d: %s (%lu devices, %s)", 
+                     groups[i].group_id, groups[i].group_name, 
+                     groups[i].estimated_device_count,
+                     groups[i].is_active ? "ACTIVE" : "INACTIVE");
+        }
+        
+        // 检查系统健康状态
+        if (esp_get_free_heap_size() < 50000) {
+            ESP_LOGW(TAG, "[WARNING] Low memory detected!");
+        }
+        
+        // 每30秒监控一次
+        vTaskDelay(pdMS_TO_TICKS(30000));
+    }
+}
+
+/* 便利测试函数 */
+void quick_test_commands(void) {
+    ESP_LOGI(TAG, "[QUICK_TEST] Starting quick test commands...");
+    
+    // 等待系统准备
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    
+    ESP_LOGI(TAG, "[TEST] All devices RED");
+    BT_BROADCAST_RED_ALL();
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    
+    ESP_LOGI(TAG, "[TEST] All devices GREEN");
+    BT_BROADCAST_GREEN_ALL();
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    
+    ESP_LOGI(TAG, "[TEST] All devices BLUE");
+    BT_BROADCAST_BLUE_ALL();
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    
+    ESP_LOGI(TAG, "[TEST] All devices BLINK RED");
+    BT_BROADCAST_BLINK_RED_ALL();
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    
+    ESP_LOGI(TAG, "[TEST] All devices OFF");
+    BT_BROADCAST_OFF_ALL();
+    
+    ESP_LOGI(TAG, "[QUICK_TEST] Test completed!");
 }
 
 void app_main(void) {
-    esp_err_t ret;
+    ESP_LOGI(TAG, "\n");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "  ESP32 Express Station - BLE Broadcast");
+    ESP_LOGI(TAG, "    Version: 2.0.0 (No Checksum)");
+    ESP_LOGI(TAG, "    Support: 5000+ smart tags");
+    ESP_LOGI(TAG, "    Scenario: Express station management");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "\n");
     
-    ESP_LOGI(TAG, "ESP32 Station starting up...");
-    
-    /* NVS Flash 初始化 */
-    ret = nvs_flash_init();
+    /* 初始化NVS */
+    esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "NVS Flash initialized");
-    
-    /* 系统配置初始化 */
+    ESP_LOGI(TAG, "[INIT] NVS flash initialized (^_^)");
+
+    /* 初始化系统配置 */
     system_config_init();
-    ESP_LOGI(TAG, "System config initialized");
-    
-    /* 创建LED命令队列 */
+    ESP_LOGI(TAG, "[INIT] System configuration loaded (^_^)");
+
+    /* 初始化LED控制器 */
     QueueHandle_t led_cmd_queue = xQueueCreate(COMMAND_QUEUE_SIZE, sizeof(led_command_t));
-    if (led_cmd_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create LED command queue");
+    if (!led_cmd_queue) {
+        ESP_LOGE(TAG, "[ERROR] Failed to create LED command queue (x_x)");
         return;
     }
-    ESP_LOGI(TAG, "LED command queue created");
     
-    /* LED控制器初始化 */
     ret = led_controller_init(led_cmd_queue);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize LED controller: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "[ERROR] Failed to initialize LED controller: %s (x_x)", esp_err_to_name(ret));
         return;
     }
-    ESP_LOGI(TAG, "LED controller initialized");
-    
-    /* 蓝牙管理器初始化 */
+    ESP_LOGI(TAG, "[INIT] LED controller initialized (^_^)");
+
+    /* 初始化蓝牙广播管理器 */
     bt_mgr_err_t bt_ret = bluetooth_manager_init();
     if (bt_ret != BT_MGR_OK) {
-        ESP_LOGE(TAG, "Failed to initialize Bluetooth manager: %d", bt_ret);
+        ESP_LOGE(TAG, "[ERROR] Failed to initialize bluetooth manager: %d (x_x)", bt_ret);
         return;
     }
-    ESP_LOGI(TAG, "Bluetooth manager initialized");
-    
-    /* 启动蓝牙管理器 */
+    ESP_LOGI(TAG, "[INIT] Bluetooth broadcast manager initialized (^_^)");
+
+    /* 设置回调函数 */
+    bluetooth_manager_set_broadcast_callback(on_broadcast_sent);
+    bluetooth_manager_set_feedback_callback(on_device_feedback);
+    ESP_LOGI(TAG, "[INIT] Callback functions registered (^_^)");
+
+    /* 启动蓝牙广播管理器 */
     bt_ret = bluetooth_manager_start();
     if (bt_ret != BT_MGR_OK) {
-        ESP_LOGE(TAG, "Failed to start Bluetooth manager: %d", bt_ret);
+        ESP_LOGE(TAG, "[ERROR] Failed to start bluetooth manager: %d (x_x)", bt_ret);
         return;
     }
-    g_system_status.bt_connected = true;  // 标记蓝牙功能已启用
-    ESP_LOGI(TAG, "Bluetooth manager started");
+    ESP_LOGI(TAG, "[START] Bluetooth broadcast manager started (^_^)");
+
+    /* 配置广播参数 */
+    bluetooth_manager_set_broadcast_interval(120); // 120ms间隔
+    bluetooth_manager_set_repeat_count(3);          // 每个命令重复3次
+    ESP_LOGI(TAG, "[CONFIG] Broadcast parameters configured (^_^)");
     
-    /* 设置蓝牙回调函数 */
-    bluetooth_manager_set_state_callback(on_device_state_changed);
-    bluetooth_manager_set_response_callback(on_device_response);
-    ESP_LOGI(TAG, "Bluetooth callbacks configured");
-    
-    /* MQTT管理器初始化 */
+    /* 初始化MQTT管理器 */
     ret = mqtt_manager_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize MQTT manager: %s", esp_err_to_name(ret));
-        return;
+        ESP_LOGW(TAG, "[WARN] Failed to initialize MQTT manager: %s", esp_err_to_name(ret));
+        ESP_LOGI(TAG, "[INFO] Continuing without MQTT support (-_-)");
+    } else {
+        ESP_LOGI(TAG, "[INIT] MQTT manager initialized (^_^)");
     }
-    ESP_LOGI(TAG, "MQTT manager initialized");
-    
-    /* OTA管理器初始化 */
+
+    /* 初始化OTA管理器 */
     ret = ota_manager_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize OTA manager: %s", esp_err_to_name(ret));
-        return;
+        ESP_LOGW(TAG, "[WARN] Failed to initialize OTA manager: %s", esp_err_to_name(ret));
+        ESP_LOGI(TAG, "[INFO] Continuing without OTA support (-_-)");
+    } else {
+        ESP_LOGI(TAG, "[INIT] OTA manager initialized (^_^)");
     }
-    ESP_LOGI(TAG, "OTA manager initialized");
+
+    /* 创建任务 */
     
-    /* 创建状态监控任务 */
-    xTaskCreate(status_monitor_task, "status_monitor", STATUS_MONITOR_STACK_SIZE, NULL, 5, NULL);
+    // LED控制器任务
+    xTaskCreate(led_command_handler_task, "led_handler", LED_CONTROLLER_STACK_SIZE, led_cmd_queue, 3, NULL);
+    ESP_LOGI(TAG, "[TASK] LED controller task created (^_^)");
     
-    ESP_LOGI(TAG, "ESP32 Station initialization completed");
-    ESP_LOGI(TAG, "Device Name: ESP32_Station_Central");
-    ESP_LOGI(TAG, "Station ready - will scan for Smart Tags automatically");
+    // 系统状态监控任务
+    xTaskCreate(status_monitor_task, "status_monitor", STATUS_MONITOR_STACK_SIZE, NULL, 2, NULL);
+    ESP_LOGI(TAG, "[TASK] Status monitor task created (^_^)");
+    
+    // 广播控制演示任务
+    xTaskCreate(broadcast_demo_task, "broadcast_demo", 4096, NULL, 4, NULL);
+    ESP_LOGI(TAG, "[TASK] Broadcast demo task created (^_^)");
+
+    ESP_LOGI(TAG, "\n");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "    ESP32 Smart Station Ready!         ");
+    ESP_LOGI(TAG, "    Broadcasting commands to 5000+ tags ");
+    ESP_LOGI(TAG, "    Monitoring system status...         ");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "\n");
+    
+    // 运行快速测试（可选）
+    // 注释掉下面这行如果不需要自动测试
+    // quick_test_commands();
 }

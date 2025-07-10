@@ -41,8 +41,7 @@ extern char MQTT_TOPIC_EXCEPTION[64];
 #define BT_DEVICE_NAME "ESP32_Station"        // BLE设备名称
 #define BLE_DEVICE_NAME "ESP32_Station"       // BLE广播名称
 #define SVC_INST_ID 0                         // 服务实例ID
-#define BLE_ADV_INTERVAL_MIN 500              // BLE广播最小间隔(ms)
-#define BLE_ADV_INTERVAL_MAX 510              // BLE广播最大间隔(ms)
+// BLE广播间隔定义移至common.h以避免重复定义
 
 // BLE LED控制协议配置
 #define BLE_MAX_PROTOCOL_DATA_LENGTH 18       // 协议数据最大长度
